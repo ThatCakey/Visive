@@ -1,12 +1,13 @@
 ﻿using System.Numerics;
 using System.Runtime.Remoting;
+using System.Security.Cryptography.X509Certificates;
 using System.Xml.Linq;
 using SixLabors.ImageSharp;
 using SixLabors.ImageSharp.PixelFormats;
 
 namespace Visive;
 
-//Current Milestone: load and export full video
+//Current Milestone: 
 
 public class Class1
 {
@@ -14,16 +15,45 @@ public class Class1
     {
         Console.WriteLine("Test Suite Started: \n");
 
-        VideoObject obj = new("test", "StreamingAssets/test.mp4");
+        using var obj = new VideoObject("test", "StreamingAssets/test.mp4");
 
         Console.WriteLine($"Created VideoObject {obj.name} from {obj.source} with id {obj.id}");
 
+        uint framecount = (uint)(obj.length * obj.fps);
+
         obj.saveOutFrame(1);
+
+        for (int i = 0; i < framecount; i++)
+        {
+            Console.WriteLine($"Swapping frame {i}");
+            FrameObject frame = obj.getFrame((uint)i);
+            SwapRedAndGreenInPlace(frame.pixels);
+            frame.SaveToIntermediary();
+        }
+
+        obj.saveOutFrame(1);
+
+        obj.SaveOutVideo(Environment.CurrentDirectory + $"/tmp/{obj.name}_Export.mp4");
+    }
+
+    public Pixel[] SwapRedAndGreenInPlace(Pixel[] pixels)
+    {
+        if (pixels == null) return null;
+
+        for (int i = 0; i <= pixels.Length -1; i++)
+        {
+            // Store the original Red value temporarily
+            ushort tempR = pixels[i].R;
+
+            // Swap them
+            pixels[i].R = pixels[i].G;
+            pixels[i].G = tempR;
+        }
+
+        return pixels;
     }
 }
-
-
-public class VideoObject
+public class VideoObject : IDisposable
 {
     public readonly string name;
     public readonly string source;
@@ -44,29 +74,42 @@ public class VideoObject
         fps = f;
         length = len;
     }
-
     public void SaveOutVideo(string ExportPath)
     {
-        var process = new System.Diagnostics.Process
+        Console.WriteLine($"FFmpeg input store: {store}");
+        Console.WriteLine($"Store exists: {File.Exists(store)}");
+        if (File.Exists(store))
+            Console.WriteLine($"Store size: {new FileInfo(store).Length} bytes");
+
+        var startInfo = new System.Diagnostics.ProcessStartInfo
         {
-            StartInfo = new System.Diagnostics.ProcessStartInfo
-            {
-                FileName = "ffmpeg",
-                Arguments = $"-f rawvideo -pix_fmt rgba -s {(int)resolution.X}x{(int)resolution.Y} -r {fps} -i \"{store}\" -c:v libx264 -preset medium \"{ExportPath}\"",
-                UseShellExecute = false,
-                CreateNoWindow = true
-            }
+            FileName = "ffmpeg",
+            Arguments = $"-y -f rawvideo -pix_fmt rgba -s {(int)resolution.X}x{(int)resolution.Y} -r {fps} -i \"{store}\" -c:v libx264 -preset medium \"{ExportPath}\"",
+            UseShellExecute = false,
+            CreateNoWindow = true,
+            RedirectStandardError = true,
+            RedirectStandardOutput = true
         };
 
+        using var process = new System.Diagnostics.Process { StartInfo = startInfo };
+
         process.Start();
+
+        string stdout = process.StandardOutput.ReadToEnd();
+        string stderr = process.StandardError.ReadToEnd();
+
         process.WaitForExit();
+
+        Console.WriteLine("--- FFmpeg stdout ---");
+        Console.WriteLine(stdout);
+        Console.WriteLine("--- FFmpeg stderr ---");
+        Console.WriteLine(stderr);
 
         if (process.ExitCode == 0)
             Console.WriteLine($"Video saved to {ExportPath}");
         else
             Console.WriteLine($"FFmpeg failed with code {process.ExitCode}");
     }
-
     public uint getFramefromTimecode(float timecode)
     {
         if (timecode > length) return 0;
@@ -77,7 +120,6 @@ public class VideoObject
         return (uint)(timecode * fps);
 
     }
-
     private string MakeIntermediary(string videoPath)
     {
         string realpath = Path.Combine(Directory.GetCurrentDirectory(), videoPath);
@@ -115,7 +157,6 @@ public class VideoObject
 
         return intermediaryPath;
     }
-
     private (Vector2 res, float fps, float len) LoadVideoMetadata(string videoPath)
     {
         string realpath = Path.Combine(Directory.GetCurrentDirectory(), videoPath);
@@ -156,10 +197,15 @@ public class VideoObject
         return (res, fps, len);
     }
 
+    public FrameObject getFrame(uint frame)
+    {
+        return new FrameObject(this, frame);
+    }
     public FrameObject getFrame(float timecode)
     {
         return new FrameObject(this, timecode);
     }
+
     public void saveOutFrame(float timecode)
     {
         FrameObject frame = getFrame(timecode);
@@ -197,19 +243,54 @@ public class VideoObject
 
         Console.WriteLine($"Saved frame to {filename}");
     }
+
+    private bool disposed;
+    public void Dispose()
+    {
+        if (disposed) return;
+        disposed = true;
+
+        if (File.Exists(store))
+            File.Delete(store);
+
+        GC.SuppressFinalize(this);
+    }
+    ~VideoObject()
+    {
+        if (!disposed && File.Exists(store))
+            File.Delete(store);
+    }
+
 }
 public class FrameObject
 {
-    public readonly Pixel[] pixels;
-
+    public Pixel[] pixels;
+    private uint frame;
+    private VideoObject videoParent;
+    public readonly bool loaded = false;
     public FrameObject(VideoObject video, float timecode)
     {
         int width = (int)video.resolution.X;
         int height = (int)video.resolution.Y;
 
-        uint frame = video.getFramefromTimecode(timecode);
+        this.frame = video.getFramefromTimecode(timecode);
+        videoParent = video;
 
-        pixels = loadFrameFromIntermediary(width, height, video, frame);
+        pixels = loadFrameFromIntermediary(width, height, video, this.frame);
+
+        loaded = true;
+    }
+    public FrameObject(VideoObject video, uint frame)
+    {
+        int width = (int)video.resolution.X;
+        int height = (int)video.resolution.Y;
+
+        this.frame = frame;
+        videoParent = video;
+
+        pixels = loadFrameFromIntermediary(width, height, video, this.frame);
+
+        loaded = true;
     }
 
     Pixel[] loadFrameFromIntermediary(int width, int height, VideoObject video, uint frame)
@@ -251,8 +332,37 @@ public class FrameObject
 
         return pixels;
     }
-}
+    public void SaveToIntermediary()
+    {
+        if (!loaded || pixels.Length <= 0) return;
 
+        // Calculate bytes per frame and frame offset
+        int bytesPerFrame = (int)videoParent.resolution.X * (int)videoParent.resolution.Y * 4;
+        long frameOffset = (long)frame * bytesPerFrame;
+
+        // Create a buffer for the raw RGBA data
+        byte[] buffer = new byte[bytesPerFrame];
+
+        // Parse Pixel structs back into RGBA bytes
+        for (int i = 0; i < pixels.Length; i++)
+        {
+            int offset = i * 4;
+
+            // Convert 10-bit back to 8-bit by shifting right
+            buffer[offset] = (byte)(pixels[i].R >> 2);
+            buffer[offset + 1] = (byte)(pixels[i].G >> 2);
+            buffer[offset + 2] = (byte)(pixels[i].B >> 2);
+            buffer[offset + 3] = pixels[i].alpha; // Alpha remained 8-bit
+        }
+
+        // Open file with OpenOrCreate and Write access to overwrite just this frame
+        using (var fs = new FileStream(videoParent.store, FileMode.OpenOrCreate, FileAccess.Write))
+        {
+            fs.Seek(frameOffset, SeekOrigin.Begin);
+            fs.Write(buffer, 0, bytesPerFrame);
+        }
+    }
+}
 public struct Pixel()
 {
     private uint rgb;      // 10-bit R, G, B packed
