@@ -15,17 +15,53 @@ public class VideoObject : IDisposable
     public readonly float fps;
     public float length;
     public readonly string id = Random.Shared.GetHexString(16, false);
+    private readonly bool ownsStore;
+    private bool disposed;
 
-    public VideoObject(string Name, String Source)
+    public VideoObject(string Name, string Source)
     {
         name = Name;
-        source = Environment.CurrentDirectory + $"/tmp/{name}/";
+        source = Path.Combine(Directory.GetCurrentDirectory(), "tmp", name);
         store = MakeIntermediary(Source);
-
         var (res, f, len) = LoadVideoMetadata(Source);
         resolution = res;
         fps = f;
         length = len;
+        ownsStore = true;   // created here, owned here
+    }
+    private VideoObject(string name, string intermediaryPath, Vector2 resolution, uint fps, float length, bool ownsStore)
+    {
+        this.name = name;
+        source = string.Empty;
+        store = intermediaryPath;
+        this.resolution = resolution;
+        this.fps = fps;
+        this.length = length;
+        this.ownsStore = ownsStore;
+    }
+    public static VideoObject MakeFromIntermediary(string intermediaryPath, Vector2 resolution, uint fps, bool ownsStore = false)
+    {
+        int width = (int)resolution.X;
+        int height = (int)resolution.Y;
+        long fileBytes = new FileInfo(intermediaryPath).Length;
+        float length = fps > 0 ? fileBytes / (width * height * 4f * fps) : 0f;
+        string name = Path.GetFileNameWithoutExtension(intermediaryPath);
+        return new VideoObject(name, intermediaryPath, resolution, fps, length, ownsStore);
+    }
+    public void Dispose()
+    {
+        if (disposed) return;
+        disposed = true;
+
+        if (ownsStore && File.Exists(store))
+            File.Delete(store);
+
+        GC.SuppressFinalize(this);
+    }
+    ~VideoObject()
+    {
+        if (!disposed && ownsStore && File.Exists(store))
+            File.Delete(store);
     }
     public void SaveOutVideo(string ExportPath)
     {
@@ -149,7 +185,6 @@ public class VideoObject : IDisposable
 
         return (res, fps, len);
     }
-
     public FrameObject getFrame(uint frame)
     {
         return new FrameObject(this, frame);
@@ -158,7 +193,6 @@ public class VideoObject : IDisposable
     {
         return new FrameObject(this, timecode);
     }
-
     public void saveOutFrame(float timecode)
     {
         FrameObject frame = getFrame(timecode);
@@ -196,24 +230,6 @@ public class VideoObject : IDisposable
 
         Console.WriteLine($"Saved frame to {filename}");
     }
-
-    private bool disposed;
-    public void Dispose()
-    {
-        if (disposed) return;
-        disposed = true;
-
-        if (File.Exists(store))
-            File.Delete(store);
-
-        GC.SuppressFinalize(this);
-    }
-    ~VideoObject()
-    {
-        if (!disposed && File.Exists(store))
-            File.Delete(store);
-    }
-
     private VideoObject(string name, string intermediaryPath, Vector2 resolution, uint fps, float length)
     {
         this.name = name;
@@ -223,7 +239,6 @@ public class VideoObject : IDisposable
         this.fps = fps;
         this.length = length;
     }
-
     public static VideoObject MakeFromIntermediary(string intermediaryPath, Vector2 Resolution, uint fps)
     {
         int width = (int)Resolution.X;
@@ -238,7 +253,6 @@ public class VideoObject : IDisposable
 
         return new VideoObject(name, intermediaryPath, Resolution, fps, length);
     }
-
     public void Append(VideoObject other)
     {
         if (resolution != other.resolution)
@@ -254,19 +268,41 @@ public class VideoObject : IDisposable
 
         length += other.length;
     }
+    public VideoObject Slice(float startTime, float endTime)
+    {
+        if (startTime < 0 || endTime <= startTime || endTime > length)
+            throw new ArgumentOutOfRangeException();
+
+        uint startFrame = getFramefromTimecode(startTime);
+        uint endFrame = getFramefromTimecode(endTime);
+        if (endFrame <= startFrame) throw new InvalidOperationException("Slice is empty.");
+
+        long bytesPerFrame = (long)resolution.X * (long)resolution.Y * 4;
+        long startByte = startFrame * bytesPerFrame;
+        long bytesToCopy = (endFrame - startFrame) * bytesPerFrame;
+
+        string tmpDir = Path.Combine(Directory.GetCurrentDirectory(), "tmp");
+        Directory.CreateDirectory(tmpDir);
+        string outPath = Path.Combine(tmpDir, $"{name}_{startFrame}_{endFrame}.seq");
+
+        using var input = File.OpenRead(store);
+        using var output = new FileStream(outPath, FileMode.Create, FileAccess.Write);
+
+        input.Seek(startByte, SeekOrigin.Begin);
+        CopyExactly(input, output, bytesToCopy);
+
+        return MakeFromIntermediary(outPath, resolution, (uint)fps, ownsStore: true);
+    }
 
     private static void CopyExactly(Stream input, Stream output, long bytesToCopy)
     {
         byte[] buffer = new byte[81920];
-
         while (bytesToCopy > 0)
         {
-            int bytesRead = input.Read(buffer, 0, (int)Math.Min(buffer.Length, bytesToCopy));
-            if (bytesRead <= 0)
-                break;
-
-            output.Write(buffer, 0, bytesRead);
-            bytesToCopy -= bytesRead;
+            int read = input.Read(buffer, 0, (int)Math.Min(buffer.Length, bytesToCopy));
+            if (read <= 0) throw new EndOfStreamException();
+            output.Write(buffer, 0, read);
+            bytesToCopy -= read;
         }
     }
 }

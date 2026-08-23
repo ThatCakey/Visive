@@ -18,9 +18,12 @@ public class VideoProcessor
 
         uint framecount = (uint)(obj.length * obj.fps);
 
-        obj.Append(obj);
+        using var part1 = obj.Slice(0f, 2f);
+        using var part2 = obj.Slice(2f, obj.length);
 
-        obj.SaveOutVideo(Environment.CurrentDirectory + $"/tmp/{obj.name}_Export.mp4");
+        part2.Append(part1);
+
+        part2.SaveOutVideo(Environment.CurrentDirectory + $"/tmp/{obj.name}_Export.mp4");
     }
 
     public Pixel[] SwapRedAndGreenInPlace(Pixel[] pixels)
