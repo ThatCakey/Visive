@@ -1,58 +1,11 @@
-﻿using System.Numerics;
-using System.Runtime.Remoting;
-using System.Security.Cryptography.X509Certificates;
-using System.Xml.Linq;
+using System;
+using System.Numerics;
+using System.IO;
 using SixLabors.ImageSharp;
 using SixLabors.ImageSharp.PixelFormats;
 
 namespace Visive;
 
-//Current Milestone: 
-
-public class Class1
-{
-    public void RunTestSuite()
-    {
-        Console.WriteLine("Test Suite Started: \n");
-
-        using var obj = new VideoObject("test", "StreamingAssets/test.mp4");
-
-        Console.WriteLine($"Created VideoObject {obj.name} from {obj.source} with id {obj.id}");
-
-        uint framecount = (uint)(obj.length * obj.fps);
-
-        obj.saveOutFrame(1);
-
-        for (int i = 0; i < framecount; i++)
-        {
-            Console.WriteLine($"Swapping frame {i}");
-            FrameObject frame = obj.getFrame((uint)i);
-            SwapRedAndGreenInPlace(frame.pixels);
-            frame.SaveToIntermediary();
-        }
-
-        obj.saveOutFrame(1);
-
-        obj.SaveOutVideo(Environment.CurrentDirectory + $"/tmp/{obj.name}_Export.mp4");
-    }
-
-    public Pixel[] SwapRedAndGreenInPlace(Pixel[] pixels)
-    {
-        if (pixels == null) return null;
-
-        for (int i = 0; i <= pixels.Length -1; i++)
-        {
-            // Store the original Red value temporarily
-            ushort tempR = pixels[i].R;
-
-            // Swap them
-            pixels[i].R = pixels[i].G;
-            pixels[i].G = tempR;
-        }
-
-        return pixels;
-    }
-}
 public class VideoObject : IDisposable
 {
     public readonly string name;
@@ -60,7 +13,7 @@ public class VideoObject : IDisposable
     public readonly string store;
     public readonly Vector2 resolution;
     public readonly float fps;
-    public readonly float length;
+    public float length;
     public readonly string id = Random.Shared.GetHexString(16, false);
 
     public VideoObject(string Name, String Source)
@@ -261,127 +214,55 @@ public class VideoObject : IDisposable
             File.Delete(store);
     }
 
-}
-public class FrameObject
-{
-    public Pixel[] pixels;
-    private uint frame;
-    private VideoObject videoParent;
-    public readonly bool loaded = false;
-    public FrameObject(VideoObject video, float timecode)
+    private VideoObject(string name, string intermediaryPath, Vector2 resolution, uint fps, float length)
     {
-        int width = (int)video.resolution.X;
-        int height = (int)video.resolution.Y;
-
-        this.frame = video.getFramefromTimecode(timecode);
-        videoParent = video;
-
-        pixels = loadFrameFromIntermediary(width, height, video, this.frame);
-
-        loaded = true;
-    }
-    public FrameObject(VideoObject video, uint frame)
-    {
-        int width = (int)video.resolution.X;
-        int height = (int)video.resolution.Y;
-
-        this.frame = frame;
-        videoParent = video;
-
-        pixels = loadFrameFromIntermediary(width, height, video, this.frame);
-
-        loaded = true;
+        this.name = name;
+        source = string.Empty;
+        store = intermediaryPath;
+        this.resolution = resolution;
+        this.fps = fps;
+        this.length = length;
     }
 
-    Pixel[] loadFrameFromIntermediary(int width, int height, VideoObject video, uint frame)
+    public static VideoObject MakeFromIntermediary(string intermediaryPath, Vector2 Resolution, uint fps)
     {
-        // Calculate bytes per frame and frame offset
-        int bytesPerFrame = width * height * 4;  // RGBA: 4 bytes per pixel
-        uint frameNumber = frame;
-        long frameOffset = frameNumber * bytesPerFrame;
+        int width = (int)Resolution.X;
+        int height = (int)Resolution.Y;
+        long fileBytes = new FileInfo(intermediaryPath).Length;
 
-        Pixel[] pixels = new Pixel[width * height];
+        float length = fps > 0
+            ? fileBytes / (width * height * 4f * fps)
+            : 0f;
 
-        using (var fs = File.OpenRead(video.store))  // Need to store this path
+        string name = Path.GetFileNameWithoutExtension(intermediaryPath);
+
+        return new VideoObject(name, intermediaryPath, Resolution, fps, length);
+    }
+
+    public void Append(VideoObject other)
+    {
+        if (resolution != other.resolution)
+            throw new InvalidOperationException("Videos must have the same resolution to append.");
+
+        if (fps != other.fps)
+            throw new InvalidOperationException("Videos must have the same fps to append.");
+
+        string inputPath = other.store;
+
+        if (ReferenceEquals(this, other))
         {
-            fs.Seek(frameOffset, SeekOrigin.Begin);
-
-            // Read raw RGBA data
-            byte[] buffer = new byte[bytesPerFrame];
-            fs.Read(buffer, 0, bytesPerFrame);
-
-            // Parse RGBA bytes into Pixel structs
-            for (int i = 0; i < width * height; i++)
-            {
-                int offset = i * 4;
-                byte r8 = buffer[offset];
-                byte g8 = buffer[offset + 1];
-                byte b8 = buffer[offset + 2];
-                byte a8 = buffer[offset + 3];
-
-                // Convert 8-bit to 10-bit
-                pixels[i] = new Pixel
-                {
-                    R = (ushort)(r8 << 2),  // Scale 0-255 to 0-1023
-                    G = (ushort)(g8 << 2),
-                    B = (ushort)(b8 << 2),
-                    alpha = a8
-                };
-            }
+            inputPath = Path.Combine(Path.GetTempPath(), $"{id}_snapshot.seq");
+            File.Copy(other.store, inputPath, true);
         }
 
-        return pixels;
-    }
-    public void SaveToIntermediary()
-    {
-        if (!loaded || pixels.Length <= 0) return;
+        using var output = new FileStream(store, FileMode.Append, FileAccess.Write);
+        using var input = new FileStream(inputPath, FileMode.Open, FileAccess.Read);
 
-        // Calculate bytes per frame and frame offset
-        int bytesPerFrame = (int)videoParent.resolution.X * (int)videoParent.resolution.Y * 4;
-        long frameOffset = (long)frame * bytesPerFrame;
+        input.CopyTo(output);
 
-        // Create a buffer for the raw RGBA data
-        byte[] buffer = new byte[bytesPerFrame];
+        if (!ReferenceEquals(this, other))
+            File.Delete(inputPath);
 
-        // Parse Pixel structs back into RGBA bytes
-        for (int i = 0; i < pixels.Length; i++)
-        {
-            int offset = i * 4;
-
-            // Convert 10-bit back to 8-bit by shifting right
-            buffer[offset] = (byte)(pixels[i].R >> 2);
-            buffer[offset + 1] = (byte)(pixels[i].G >> 2);
-            buffer[offset + 2] = (byte)(pixels[i].B >> 2);
-            buffer[offset + 3] = pixels[i].alpha; // Alpha remained 8-bit
-        }
-
-        // Open file with OpenOrCreate and Write access to overwrite just this frame
-        using (var fs = new FileStream(videoParent.store, FileMode.OpenOrCreate, FileAccess.Write))
-        {
-            fs.Seek(frameOffset, SeekOrigin.Begin);
-            fs.Write(buffer, 0, bytesPerFrame);
-        }
+        length += other.length;
     }
 }
-public struct Pixel()
-{
-    private uint rgb;      // 10-bit R, G, B packed
-    public byte alpha;     // 8-bit alpha
-
-    public ushort R
-    {
-        get => (ushort)((rgb >> 20) & 0x3FF);
-        set => rgb = (rgb & ~(0x3FFu << 20)) | ((uint)value & 0x3FF) << 20;
-    }
-    public ushort G
-    {
-        get => (ushort)((rgb >> 10) & 0x3FF);
-        set => rgb = (rgb & ~(0x3FFu << 10)) | ((uint)value & 0x3FF) << 10;
-    }
-    public ushort B
-    {
-        get => (ushort)(rgb & 0x3FF);
-        set => rgb = (rgb & ~0x3FFu) | ((uint)value & 0x3FF);
-    }
-}
-

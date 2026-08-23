@@ -1,10 +1,6 @@
 ﻿using Visive;
 
 // Now you can use Class1 or other classes from Visive
-var obj = new Class1();
-
-Thread.Sleep(5);
+var obj = new VideoProcessor();
 
 obj.RunTestSuite();
-
-Thread.Sleep(1);
