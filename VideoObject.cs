@@ -247,22 +247,26 @@ public class VideoObject : IDisposable
         if (fps != other.fps)
             throw new InvalidOperationException("Videos must have the same fps to append.");
 
-        string inputPath = other.store;
-
-        if (ReferenceEquals(this, other))
-        {
-            inputPath = Path.Combine(Path.GetTempPath(), $"{id}_snapshot.seq");
-            File.Copy(other.store, inputPath, true);
-        }
-
+        using var source = File.OpenRead(other.store);
         using var output = new FileStream(store, FileMode.Append, FileAccess.Write);
-        using var input = new FileStream(inputPath, FileMode.Open, FileAccess.Read);
 
-        input.CopyTo(output);
-
-        if (!ReferenceEquals(this, other))
-            File.Delete(inputPath);
+        CopyExactly(source, output, source.Length);
 
         length += other.length;
+    }
+
+    private static void CopyExactly(Stream input, Stream output, long bytesToCopy)
+    {
+        byte[] buffer = new byte[81920];
+
+        while (bytesToCopy > 0)
+        {
+            int bytesRead = input.Read(buffer, 0, (int)Math.Min(buffer.Length, bytesToCopy));
+            if (bytesRead <= 0)
+                break;
+
+            output.Write(buffer, 0, bytesRead);
+            bytesToCopy -= bytesRead;
+        }
     }
 }

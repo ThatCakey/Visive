@@ -23,3 +23,4 @@ public struct Pixel
         set => rgb = (rgb & ~0x3FFu) | ((uint)value & 0x3FF);
     }
 }
+
