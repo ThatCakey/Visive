@@ -229,3 +229,7 @@ FakesAssemblies/
 # Temporary video processing
 tmp/
 Testing/tmp/
+
+# dotnet temp
+/tmp_dotnet/
+**/NuGetScratch*/
