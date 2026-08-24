@@ -305,4 +305,41 @@ public class VideoObject : IDisposable
             bytesToCopy -= read;
         }
     }
+
+    public byte[] ReadBytes(long offset, int count)
+    {
+        if (count <= 0)
+            return Array.Empty<byte>();
+
+        byte[] buffer = new byte[count];
+
+        using var stream = File.OpenRead(store);
+        stream.Seek(offset, SeekOrigin.Begin);
+
+        int totalRead = 0;
+        while (totalRead < count)
+        {
+            int read = stream.Read(buffer, totalRead, count - totalRead);
+            if (read <= 0)
+                break;
+
+            totalRead += read;
+        }
+
+        if (totalRead == count)
+            return buffer;
+
+        Array.Resize(ref buffer, totalRead);
+        return buffer;
+    }
+
+    public void WriteBytes(long offset, byte[] buffer)
+    {
+        if (buffer == null || buffer.Length == 0)
+            return;
+
+        using var stream = new FileStream(store, FileMode.OpenOrCreate, FileAccess.Write);
+        stream.Seek(offset, SeekOrigin.Begin);
+        stream.Write(buffer, 0, buffer.Length);
+    }
 }

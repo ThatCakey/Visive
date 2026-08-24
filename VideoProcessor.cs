@@ -23,6 +23,8 @@ public class VideoProcessor
 
         part2.Append(part1);
 
+        SwapRedAndGreenInPlace(part2);
+
         part2.SaveOutVideo(Environment.CurrentDirectory + $"/tmp/{obj.name}_Export.mp4");
     }
 
@@ -43,7 +45,7 @@ public class VideoProcessor
         return pixels;
     }
 
-    public VideoObject SwapRedAndGreenInPlace(VideoObject video)
+    public void SwapRedAndGreenInPlace(VideoObject video)
     {
         uint framecount = (uint)(video.length * video.fps);
 
@@ -55,7 +57,7 @@ public class VideoProcessor
             frame.SaveToIntermediary();
         }
 
-        return video;
+        return;
     }
 
 }
