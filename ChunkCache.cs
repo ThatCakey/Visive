@@ -79,6 +79,10 @@ public class ChunkCache : IDisposable
 
         CompressChunk(currentChunkData, chunkPath);
         currentChunkDirty = false;
+        
+        // Clear memory cache after flushing to free RAM
+        Console.WriteLine($"[ChunkCache] Cleared chunk {startFrame}-{endFrame} from memory after flushing");
+        Clear();
     }
 
     /// <summary>

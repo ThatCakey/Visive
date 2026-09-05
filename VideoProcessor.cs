@@ -4,7 +4,7 @@ using SixLabors.ImageSharp.PixelFormats;
 
 namespace Visive;
 
-//Current Milestone: 
+//Current Milestone: audio
 
 public class VideoProcessor
 {
@@ -12,14 +12,14 @@ public class VideoProcessor
     {
         Console.WriteLine("Test Suite Started: \n");
 
-        using var obj = new VideoObject("test", "StreamingAssets/test.mp4");
+        using var obj = new VideoObject("test", "StreamingAssets/Test2.mp4");
 
-        Console.WriteLine($"Created VideoObject {obj.name} from {obj.source} with id {obj.id}");
+        Console.WriteLine($"[TestSequence] Created VideoObject {obj.name} from {obj.source} with id {obj.id}");
 
         uint framecount = (uint)(obj.length * obj.fps);
 
-        using var part1 = obj.Slice(0f, 2f);
-        using var part2 = obj.Slice(2f, obj.length);
+        using var part1 = obj.Slice(0f, 10f);
+        using var part2 = obj.Slice(10f, obj.length);
 
         part2.Append(part1);
 
