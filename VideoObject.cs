@@ -17,7 +17,7 @@ public class VideoObject : IDisposable
     public readonly string id = Random.Shared.GetHexString(16, false);
     private readonly bool ownsStore;
     private bool disposed;
-    
+
     private ChunkManifest? manifest;
     private ChunkCache? cache;
     private readonly string chunksDirectory;
@@ -37,11 +37,11 @@ public class VideoObject : IDisposable
         fps = f;
         length = len;
         ownsStore = true;   // created here, owned here
-        
+
         // Phase 2: Initialize chunk system
         chunksDirectory = Path.Combine(Path.GetDirectoryName(store)!, $"{name}_chunks");
         InitializeChunks();
-        
+
         // Audio Extraction: Extract audio from source for re-muxing on export
         ExtractAudio(Source);
     }
@@ -55,10 +55,29 @@ public class VideoObject : IDisposable
         this.fps = fps;
         this.length = length;
         this.ownsStore = ownsStore;
-        
+
         // Phase 2: Initialize chunk system
         chunksDirectory = Path.Combine(Path.GetDirectoryName(store)!, $"{name}_chunks");
         InitializeChunks();
+
+        // Phase 2b: For sliced objects, register the entire intermediary file as a chunk
+        // so ReadBytes can find and read the data without needing to extract from source
+        if (source == string.Empty && File.Exists(intermediaryPath))
+        {
+            Console.WriteLine($"[Constructor] Registering intermediary as chunk for sliced object");
+            uint totalFrames = (uint)(length * fps);
+            var chunkEntry = new ChunkEntry
+            {
+                StartFrame = 0,
+                EndFrame = totalFrames,
+                UncompressedBytes = (uint)new FileInfo(intermediaryPath).Length,
+                CompressedBytes = 0,  // Not compressed yet
+                Hash = "",  // Will be computed if needed
+                IsDirty = false  // It's from disk, not newly modified
+            };
+            manifest?.AddOrUpdateChunk(chunkEntry);
+            Console.WriteLine($"[Constructor] Registered chunk 0-{totalFrames} for {chunkEntry.UncompressedBytes} bytes");
+        }
     }
     public static VideoObject MakeFromIntermediary(string intermediaryPath, Vector2 resolution, uint fps, bool ownsStore = false)
     {
@@ -79,7 +98,7 @@ public class VideoObject : IDisposable
         {
             Console.WriteLine($"[Phase 4] Flushing dirty chunks...");
             FlushAllDirtyChunks();
-            
+
             // Save manifest with updated compression ratios
             string manifestPath = Path.Combine(chunksDirectory, $"{name}.manifest.json");
             Console.WriteLine($"[Phase 4] Saving manifest to {manifestPath}");
@@ -97,14 +116,14 @@ public class VideoObject : IDisposable
         {
             if (File.Exists(store))
                 File.Delete(store);
-            
+
             // Clean up audio file only if we own it (not transferred from parent)
             if (ownsAudio && !string.IsNullOrEmpty(audioPath) && File.Exists(audioPath))
             {
                 Console.WriteLine($"[Audio] Deleting audio file: {audioPath}");
                 File.Delete(audioPath);
             }
-            
+
             // Clean up chunks directory if this VideoObject owns the store
             if (Directory.Exists(chunksDirectory))
             {
@@ -240,7 +259,7 @@ public class VideoObject : IDisposable
             // Delete old audio only if we own it (not transferred from parent)
             if (ownsAudio && File.Exists(audioPath))
                 File.Delete(audioPath);
-            
+
             audioPath = trimmedPath;
             ownsAudio = true;  // We own the trimmed file
             long audioSize = new FileInfo(audioPath).Length;
@@ -272,7 +291,7 @@ public class VideoObject : IDisposable
 
         string audioDir = Path.Combine(Directory.GetCurrentDirectory(), "tmp");
         Directory.CreateDirectory(audioDir);
-        
+
         // Create concat demuxer file
         string concatFile = Path.Combine(audioDir, $"{name}_audio_concat.txt");
         string concatenatedPath = Path.Combine(audioDir, $"{name}_audio_concat.aac");
@@ -307,12 +326,12 @@ public class VideoObject : IDisposable
             // Delete old audio only if we own it
             if (ownsAudio && File.Exists(audioPath))
                 File.Delete(audioPath);
-            
+
             audioPath = concatenatedPath;
             ownsAudio = true;  // We own the concatenated file
             long audioSize = new FileInfo(audioPath).Length;
             Console.WriteLine($"[Audio] Concatenated audio: {audioSize} bytes");
-            
+
             // Clean up concat file
             if (File.Exists(concatFile))
                 File.Delete(concatFile);
@@ -495,9 +514,9 @@ public class VideoObject : IDisposable
     private byte[] ReadFileStreaming(string filePath)
     {
         using var stream = new FileStream(filePath, FileMode.Open, FileAccess.Read, FileShare.Read, bufferSize: 81920);
-        
+
         long fileSize = stream.Length;
-        
+
         // Chunk size is now calculated to stay under 500MB, so this should not trigger
         if (fileSize > int.MaxValue)
         {
@@ -518,6 +537,29 @@ public class VideoObject : IDisposable
 
         return buffer;
     }
+
+    private byte[] ReadFileStreaming(string filePath, long offset, int count)
+    {
+        using var stream = new FileStream(filePath, FileMode.Open, FileAccess.Read, FileShare.Read, bufferSize: 81920);
+
+        // Seek to offset
+        stream.Seek(offset, SeekOrigin.Begin);
+
+        byte[] buffer = new byte[count];
+        int totalRead = 0;
+        int bytesRead;
+
+        while (totalRead < count && (bytesRead = stream.Read(buffer, totalRead, count - totalRead)) > 0)
+        {
+            totalRead += bytesRead;
+        }
+
+        if (totalRead < count)
+            Array.Resize(ref buffer, totalRead);
+
+        return buffer;
+    }
+
 
     private (Vector2 res, float fps, float len) LoadVideoMetadata(string videoPath)
     {
@@ -542,7 +584,7 @@ public class VideoObject : IDisposable
         var lines = output.Trim().Split('\n');
         Vector2 res = new(255, 255);
         float fps = 24, len = 0;
-        
+
         Console.WriteLine($"[LoadVideoMetadata] ffprobe output ({lines.Length} lines):");
         for (int i = 0; i < lines.Length; i++)
         {
@@ -560,7 +602,7 @@ public class VideoObject : IDisposable
             }
             float.TryParse(lines[3], out len);
             res = new Vector2(w, h);
-            
+
             Console.WriteLine($"[LoadVideoMetadata] Parsed: res={w}x{h}, fps={fps}, len={len}");
         }
 
@@ -626,18 +668,43 @@ public class VideoObject : IDisposable
         uint otherTotalFrames = (uint)(other.length * other.fps);
         long totalBytes = bytesPerFrame * otherTotalFrames;
 
-        // Read all data from other video via chunks (triggers lazy extraction if needed)
-        byte[] sourceData = other.ReadBytes(0, (int)Math.Min(int.MaxValue, totalBytes));
-
-        // Append our current size and write the data
+        // Calculate current offset for writing
         uint currentTotalFrames = (uint)(length * fps);
         long currentLength = bytesPerFrame * currentTotalFrames;
-        WriteBytes(currentLength, sourceData);
 
+        // READ FROM OTHER VIDEO - Loop in 500MB chunks
+        Console.WriteLine($"[Append] About to read from {other.name}");
+        Console.WriteLine($"[Append] Other video: {otherTotalFrames} frames, {totalBytes} bytes total");
+        Console.WriteLine($"[Append] Other store file: {other.store}, exists: {File.Exists(other.store)}, size: {(File.Exists(other.store) ? new FileInfo(other.store).Length : 0)}");
+
+        long bytesTransferred = 0;
+
+        while (bytesTransferred < totalBytes)
+        {
+            int readSize = (int)Math.Min(int.MaxValue, totalBytes - bytesTransferred);
+            byte[] sourceData = other.ReadBytes(bytesTransferred, readSize);
+
+            if (sourceData.Length == 0)
+            {
+                Console.WriteLine($"[Append] Hit end of source data at {bytesTransferred}/{totalBytes}");
+                break;  // No more data
+            }
+
+            Console.WriteLine($"[Append] ReadBytes returned {sourceData.Length} bytes (chunk {bytesTransferred / (500_000_000) + 1})");
+            Console.WriteLine($"[Append] First 16 bytes of sourceData: {string.Join(" ", sourceData.Take(16).Select(b => b.ToString("X2")))}");
+
+            WriteBytes(currentLength + bytesTransferred, sourceData);
+
+            Console.WriteLine($"[Append] WriteBytes wrote {sourceData.Length} bytes, total progress: {bytesTransferred + sourceData.Length}/{totalBytes}");
+
+            bytesTransferred += sourceData.Length;
+        }
+
+        Console.WriteLine($"[Append] Transfer complete: {bytesTransferred}/{totalBytes} bytes");
         length += other.length;
-        
+
         // Ensure this object has audio before trying to concatenate
-        if ((string.IsNullOrEmpty(audioPath) || !File.Exists(audioPath)) && 
+        if ((string.IsNullOrEmpty(audioPath) || !File.Exists(audioPath)) &&
             !string.IsNullOrEmpty(other.audioPath) && File.Exists(other.audioPath))
         {
             // If we don't have audio but other does, just use other's audio
@@ -655,7 +722,7 @@ public class VideoObject : IDisposable
     public VideoObject Slice(float startTime, float endTime)
     {
         Console.WriteLine($"[Slice] Starting Slice({startTime}, {endTime})");
-        
+
         if (startTime < 0 || endTime <= startTime || endTime > length)
         {
             Console.WriteLine($"[Slice] Validation failed: startTime={startTime}, endTime={endTime}, length={length}");
@@ -665,7 +732,7 @@ public class VideoObject : IDisposable
         uint startFrame = getFramefromTimecode(startTime);
         uint endFrame = getFramefromTimecode(endTime);
         Console.WriteLine($"[Slice] Frames: {startFrame}-{endFrame}");
-        
+
         if (endFrame <= startFrame)
         {
             Console.WriteLine($"[Slice] Empty slice: startFrame={startFrame}, endFrame={endFrame}");
@@ -682,57 +749,59 @@ public class VideoObject : IDisposable
 
         Console.WriteLine($"[Slice] Reading frames {startFrame}-{endFrame} from parent");
         Console.WriteLine($"[Slice] Copying {bytesToCopy} bytes ({endFrame - startFrame} frames) to {outPath}");
-        
+
         try
         {
             // Stream data directly to file instead of buffering in memory
             // This avoids the 2GB array size limit
             using var outputStream = new FileStream(outPath, FileMode.Create, FileAccess.Write, FileShare.None, 81920);
-            
+
             long bytesCopied = 0;
             long currentOffset = startByte;
-            
+
             while (bytesCopied < bytesToCopy)
             {
                 int readSize = (int)Math.Min(int.MaxValue, bytesToCopy - bytesCopied);
                 Console.WriteLine($"[Slice] Reading chunk: offset={currentOffset}, size={readSize}, total progress: {bytesCopied}/{bytesToCopy}");
-                
+
                 byte[] chunk = ReadBytes(currentOffset, readSize);
                 if (chunk.Length == 0)
                 {
                     Console.WriteLine($"[Slice] Hit end of data at {bytesCopied}/{bytesToCopy} bytes");
                     break;
                 }
-                
+
                 outputStream.Write(chunk, 0, chunk.Length);
                 bytesCopied += chunk.Length;
                 currentOffset += chunk.Length;
-                
+
                 Console.WriteLine($"[Slice] Wrote {chunk.Length} bytes, total: {bytesCopied}/{bytesToCopy}");
             }
-            
+
             outputStream.Flush();
+            outputStream.Close();  // IMPORTANT: explicitly close before next use
+            outputStream.Dispose();
             Console.WriteLine($"[Slice] Finished streaming {bytesCopied} bytes");
 
             var sliced = MakeFromIntermediary(outPath, resolution, (uint)fps, ownsStore: true);
             Console.WriteLine($"[Slice] Created sliced object");
-            
+
             // Transfer parent audio to sliced object if parent has audio but slice doesn't
             // (slice tries to extract from .seq file which fails)
-            if ((string.IsNullOrEmpty(sliced.audioPath) || !File.Exists(sliced.audioPath)) && 
+            if ((string.IsNullOrEmpty(sliced.audioPath) || !File.Exists(sliced.audioPath)) &&
                 !string.IsNullOrEmpty(audioPath) && File.Exists(audioPath))
             {
                 Console.WriteLine($"[Audio] Transferring parent audio to slice");
                 sliced.audioPath = audioPath;
                 sliced.ownsAudio = false;  // Don't delete parent's audio
             }
-            
+
             // Trim audio to match slice time range
             if (!string.IsNullOrEmpty(sliced.audioPath) && File.Exists(sliced.audioPath))
             {
                 sliced.TrimAudio(startTime, endTime);
             }
-            
+
             Console.WriteLine($"[Slice] Slice complete, returning object");
             return sliced;
         }
@@ -760,7 +829,7 @@ public class VideoObject : IDisposable
     {
         if (count <= 0 || cache == null || manifest == null)
         {
-            Console.WriteLine($"[ReadBytes] Early return: count={count}, cache={cache!=null}, manifest={manifest!=null}");
+            Console.WriteLine($"[ReadBytes] Early return: count={count}, cache={cache != null}, manifest={manifest != null}");
             return Array.Empty<byte>();
         }
 
@@ -768,7 +837,7 @@ public class VideoObject : IDisposable
         // Callers should loop if they need more data
         const int MAX_BUFFER_SIZE = 500_000_000; // 500MB
         int actualCount = Math.Min(count, MAX_BUFFER_SIZE);
-        
+
         Console.WriteLine($"[ReadBytes] Allocating {actualCount} bytes (requested {count})");
         byte[] result = new byte[actualCount];
         long currentOffset = offset;
@@ -807,8 +876,26 @@ public class VideoObject : IDisposable
             try
             {
                 // Load chunk via cache (decompresses if needed)
-                byte[] chunkData = cache.GetChunk(loopChunk);
-                
+                byte[] chunkData;
+
+                // For sliced objects (source=""), try to load chunk from cache or store
+                if (source == string.Empty && !File.Exists(Path.Combine(Path.GetDirectoryName(store)!, $"{name}_chunks", $"chunk_{loopChunk.StartFrame}_{loopChunk.EndFrame}.bin")))
+                {
+                    // No compressed chunk file - load raw data from store file for this chunk
+                    Console.WriteLine($"[ReadBytes] Loading raw chunk data from store for sliced object");
+                    long rawChunkStartByte = (long)loopChunk.StartFrame * (long)resolution.X * (long)resolution.Y * 4;
+                    long rawChunkEndByte = (long)loopChunk.EndFrame * (long)resolution.X * (long)resolution.Y * 4;
+                    long rawChunkSize = rawChunkEndByte - rawChunkStartByte;
+
+                    chunkData = ReadFileStreaming(store, rawChunkStartByte, (int)Math.Min(int.MaxValue, rawChunkSize));
+                    Console.WriteLine($"[ReadBytes] Loaded {chunkData.Length} bytes from store");
+                }
+                else
+                {
+                    // Normal path: load from cache (which loads compressed chunk from disk)
+                    chunkData = cache.GetChunk(loopChunk);
+                }
+
                 // Calculate position within chunk
                 long chunkStartByte = loopChunk.StartFrame * (long)resolution.X * (long)resolution.Y * 4;
                 long posInChunk = currentOffset - chunkStartByte;
@@ -843,82 +930,90 @@ public class VideoObject : IDisposable
     }
 
     public void WriteBytes(long offset, byte[] buffer)
+{
+    if (buffer == null || buffer.Length == 0 || cache == null || manifest == null)
+        return;
+
+    long frameIndex = offset / ((long)resolution.X * (long)resolution.Y * 4);
+    uint frameIdxUint = (uint)frameIndex;
+
+    // Phase 3: Check if chunk exists; if not, extract it
+    var chunk = manifest.FindChunkForFrame(frameIdxUint);
+    if (chunk == null)
     {
-        if (buffer == null || buffer.Length == 0 || cache == null || manifest == null)
-            return;
+        // No chunk for this frame, try to extract a chunk based on calculated size
+        uint chunkSize = calculatedChunkSize;
+        uint chunkStart = (frameIdxUint / chunkSize) * chunkSize;
+        uint chunkEnd = Math.Min(chunkStart + chunkSize, (uint)(length * fps));
 
-        long frameIndex = offset / ((long)resolution.X * (long)resolution.Y * 4);
-        uint frameIdxUint = (uint)frameIndex;
-
-        // Phase 3: Check if chunk exists; if not, extract it
-        var chunk = manifest.FindChunkForFrame(frameIdxUint);
-        if (chunk == null)
+        if (chunkEnd > chunkStart)
         {
-            // No chunk for this frame, try to extract a chunk based on calculated size
-            uint chunkSize = calculatedChunkSize;
-            uint chunkStart = (frameIdxUint / chunkSize) * chunkSize;
-            uint chunkEnd = Math.Min(chunkStart + chunkSize, (uint)(length * fps));
-            
-            if (chunkEnd > chunkStart)
-            {
-                ExtractChunk(chunkStart, chunkEnd);
-                chunk = manifest.FindChunkForFrame(frameIdxUint);
-            }
-        }
-
-        if (manifest.Chunks.Count == 0)
-        {
-            // Still no chunks, fall back to raw store
-            WriteBytesToRawStore(offset, buffer);
-            return;
-        }
-
-        long currentOffset = offset;
-        int bytesWritten = 0;
-
-        while (bytesWritten < buffer.Length)
-        {
-            // Find or create chunk for current offset
-            long loopFrameIndex = currentOffset / ((long)resolution.X * (long)resolution.Y * 4);
-            var loopChunk = manifest.FindChunkForFrame((uint)loopFrameIndex);
-
-            if (loopChunk == null)
-            {
-                // No chunk found, stop writing
-                break;
-            }
-
-            try
-            {
-                // Load chunk via cache
-                byte[] chunkData = cache.GetChunk(loopChunk);
-                
-                // Calculate position within chunk
-                long chunkStartByte = loopChunk.StartFrame * (long)resolution.X * (long)resolution.Y * 4;
-                long posInChunk = currentOffset - chunkStartByte;
-                long bytesAvailableInChunk = chunkData.Length - posInChunk;
-
-                if (bytesAvailableInChunk <= 0)
-                {
-                    break;  // No space in this chunk
-                }
-
-                int toCopy = (int)Math.Min(bytesAvailableInChunk, buffer.Length - bytesWritten);
-                Array.Copy(buffer, bytesWritten, chunkData, posInChunk, toCopy);
-
-                // Mark chunk as dirty (needs compression on flush)
-                cache.SetChunk(loopChunk.StartFrame, loopChunk.EndFrame, chunkData);
-
-                bytesWritten += toCopy;
-                currentOffset += toCopy;
-            }
-            catch
-            {
-                // If chunk write fails, stop
-                break;
-            }
+            ExtractChunk(chunkStart, chunkEnd);
+            chunk = manifest.FindChunkForFrame(frameIdxUint);
         }
     }
+
+    if (manifest.Chunks.Count == 0)
+    {
+        // Still no chunks, fall back to raw store
+        WriteBytesToRawStore(offset, buffer);
+        return;
+    }
+
+    long currentOffset = offset;
+    int bytesWritten = 0;
+
+    while (bytesWritten < buffer.Length)
+    {
+        // Find or create chunk for current offset
+        long loopFrameIndex = currentOffset / ((long)resolution.X * (long)resolution.Y * 4);
+        var loopChunk = manifest.FindChunkForFrame((uint)loopFrameIndex);
+
+        if (loopChunk == null)
+        {
+            // No chunk found at this offset - fall back to raw store for remaining bytes
+            Console.WriteLine($"[WriteBytes] No chunk for frame {(uint)loopFrameIndex}, falling back to raw store for remaining {buffer.Length - bytesWritten} bytes");
+            int remainingBytes = buffer.Length - bytesWritten;
+            byte[] remainingBuffer = new byte[remainingBytes];
+            Array.Copy(buffer, bytesWritten, remainingBuffer, 0, remainingBytes);
+            WriteBytesToRawStore(currentOffset, remainingBuffer);
+            bytesWritten = buffer.Length;  // Mark as complete
+            break;
+        }
+
+        try
+        {
+            // Load chunk via cache
+            byte[] chunkData = cache.GetChunk(loopChunk);
+
+            // Calculate position within chunk
+            long chunkStartByte = loopChunk.StartFrame * (long)resolution.X * (long)resolution.Y * 4;
+            long posInChunk = currentOffset - chunkStartByte;
+            long bytesAvailableInChunk = chunkData.Length - posInChunk;
+
+            if (bytesAvailableInChunk <= 0)
+            {
+                break;  // No space in this chunk
+            }
+
+            int toCopy = (int)Math.Min(bytesAvailableInChunk, buffer.Length - bytesWritten);
+            Array.Copy(buffer, bytesWritten, chunkData, posInChunk, toCopy);
+
+            // Mark chunk as dirty (needs compression on flush)
+            cache.SetChunk(loopChunk.StartFrame, loopChunk.EndFrame, chunkData);
+
+            bytesWritten += toCopy;
+            currentOffset += toCopy;
+        }
+        catch
+        {
+            // If chunk write fails, stop
+            break;
+        }
+    }
+
+    Console.WriteLine($"[WriteBytes] Wrote {bytesWritten}/{buffer.Length} bytes at offset {offset}");
+}
 
     private byte[] ReadBytesFromCachedChunksOnly(long offset, int count)
     {
@@ -949,11 +1044,11 @@ public class VideoObject : IDisposable
             try
             {
                 byte[] chunkData = cache.GetChunk(loopChunk);
-                
+
                 // Calculate position within chunk
                 long chunkStartByte = (long)loopChunk.StartFrame * (long)resolution.X * (long)resolution.Y * 4;
                 long offsetInChunk = currentOffset - chunkStartByte;
-                
+
                 // Calculate how much we can read from this chunk
                 int bytesToReadFromChunk = (int)Math.Min(
                     count - bytesRead,
@@ -1028,12 +1123,12 @@ public class VideoObject : IDisposable
     private void InitializeChunks()
     {
         cache = new ChunkCache(chunksDirectory);
-        
+
         // Calculate dynamic chunk size based on video resolution
         CalculateChunkSize();
-        
+
         string manifestPath = Path.Combine(chunksDirectory, $"{name}.manifest.json");
-        
+
         if (File.Exists(manifestPath))
         {
             // Load existing manifest
@@ -1054,7 +1149,7 @@ public class VideoObject : IDisposable
     {
         const long targetMaxBytes = 100_000_000;  // 100MB target chunk size in RAM (accounts for multiple objects)
         long bytesPerFrame = (long)resolution.X * (long)resolution.Y * 4;  // RGBA = 4 bytes
-        
+
         if (bytesPerFrame <= 0)
         {
             calculatedChunkSize = 300;  // Fallback
@@ -1063,10 +1158,10 @@ public class VideoObject : IDisposable
 
         // Calculate how many frames fit in 500MB
         uint framesInBudget = (uint)(targetMaxBytes / bytesPerFrame);
-        
+
         // Ensure at least 1 frame per chunk, and cap to total frames
         calculatedChunkSize = Math.Max(1, Math.Min(framesInBudget, (uint)(length * fps)));
-        
+
         long chunkBytes = bytesPerFrame * calculatedChunkSize;
         Console.WriteLine($"[Phase 2] Calculated chunk size: {calculatedChunkSize} frames = {chunkBytes / 1_000_000}MB per chunk");
     }
