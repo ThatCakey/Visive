@@ -6,45 +6,6 @@ using SixLabors.ImageSharp.PixelFormats;
 
 namespace Visive;
 
-// TODO: Memory-Efficient Chunked Video Architecture
-// Goal: Minimal RAM footprint with lazy-loaded, disk-compressed chunks
-// 
-// PHASE 1: Infrastructure
-// - [ ] Create ChunkManifest.cs
-//   - Serialize/deserialize chunk metadata (frame ranges, compression ratios, dirty flags)
-//   - JSON-based: name.manifest.json in chunks/ directory
-//   - Track: startFrame, endFrame, compressed size, uncompressed size, hash, isDirty
-// 
-// - [ ] Create ChunkCache.cs
-//   - Single chunk in memory max (decompress on demand)
-//   - Compress on evict (using System.IO.Compression.GzipStream)
-//   - Methods: GetChunk(index), SetChunk(index, data), Flush(), Clear()
-//   - Memory cap: ~50-100MB per VideoObject
-//
-// PHASE 2: Refactor VideoObject
-// - [ ] Replace MakeIntermediary to create manifest only (no full .seq extraction)
-// - [ ] Replace ReadBytes/WriteBytes to intercept I/O via ChunkCache
-// - [ ] Update Slice() to create new manifest pointing to chunk ranges
-// - [ ] Update Append() to chain manifests (virtual concatenation)
-// - [ ] Update SaveOutVideo() to stream-reconstruct from compressed chunks
-//
-// PHASE 3: Chunk Extraction Strategy
-// - [ ] Add ExtractChunk(chunkIndex) using ffmpeg -ss/-t
-//   - Seek to frame start time: (frame / fps)
-//   - Extract N frames: ffmpeg -ss {startTime} -t {duration} -f rawvideo -pix_fmt rgba ...
-//   - Compress and store in chunks/ directory
-// - [ ] Make extraction lazy: only on first ReadBytes/WriteBytes access
-//
-// PHASE 4: Disposal & Cleanup
-// - [ ] Flush dirty chunks on Dispose (compress and save)
-// - [ ] Delete chunks/ directory on ownsStore disposal
-// - [ ] Preserve manifest for reload (optional, for caching)
-//
-// Expected Results:
-// - Memory: Constant ~50-100MB regardless of video length
-// - Disk (chunks/): ~10-20% of raw .seq size (compressed)
-// - No monolithic .seq file on disk
-
 public class VideoObject : IDisposable
 {
     public readonly string name;
@@ -56,17 +17,26 @@ public class VideoObject : IDisposable
     public readonly string id = Random.Shared.GetHexString(16, false);
     private readonly bool ownsStore;
     private bool disposed;
+    
+    private ChunkManifest? manifest;
+    private ChunkCache? cache;
+    private readonly string chunksDirectory;
 
     public VideoObject(string Name, string Source)
     {
         name = Name;
-        source = Path.Combine(Directory.GetCurrentDirectory(), "tmp", name);
+        // Make source path absolute so it works from any working directory (e.g., FFmpeg subprocesses)
+        source = Path.IsPathRooted(Source) ? Source : Path.Combine(Directory.GetCurrentDirectory(), Source);
         store = MakeIntermediary(Source);
         var (res, f, len) = LoadVideoMetadata(Source);
         resolution = res;
         fps = f;
         length = len;
         ownsStore = true;   // created here, owned here
+        
+        // Phase 2: Initialize chunk system
+        chunksDirectory = Path.Combine(Path.GetDirectoryName(store)!, $"{name}_chunks");
+        InitializeChunks();
     }
     private VideoObject(string name, string intermediaryPath, Vector2 resolution, uint fps, float length, bool ownsStore)
     {
@@ -77,6 +47,10 @@ public class VideoObject : IDisposable
         this.fps = fps;
         this.length = length;
         this.ownsStore = ownsStore;
+        
+        // Phase 2: Initialize chunk system
+        chunksDirectory = Path.Combine(Path.GetDirectoryName(store)!, $"{name}_chunks");
+        InitializeChunks();
     }
     public static VideoObject MakeFromIntermediary(string intermediaryPath, Vector2 resolution, uint fps, bool ownsStore = false)
     {
@@ -92,15 +66,77 @@ public class VideoObject : IDisposable
         if (disposed) return;
         disposed = true;
 
-        if (ownsStore && File.Exists(store))
-            File.Delete(store);
+        // Phase 4: Flush dirty chunks and save manifest before cleanup
+        if (cache != null && manifest != null)
+        {
+            Console.WriteLine($"[Phase 4] Flushing dirty chunks...");
+            FlushAllDirtyChunks();
+            
+            // Save manifest with updated compression ratios
+            string manifestPath = Path.Combine(chunksDirectory, $"{name}.manifest.json");
+            Console.WriteLine($"[Phase 4] Saving manifest to {manifestPath}");
+            manifest.Save(manifestPath);
+            Console.WriteLine($"[Phase 4] Manifest saved");
+        }
+
+        if (cache != null)
+        {
+            cache.Dispose();
+            cache = null;
+        }
+
+        if (ownsStore)
+        {
+            if (File.Exists(store))
+                File.Delete(store);
+            
+            // Clean up chunks directory if this VideoObject owns the store
+            if (Directory.Exists(chunksDirectory))
+            {
+                Console.WriteLine($"[Phase 4] Cleaning up chunks directory: {chunksDirectory}");
+                Directory.Delete(chunksDirectory, recursive: true);
+                Console.WriteLine($"[Phase 4] Chunks directory removed");
+            }
+        }
+        else
+        {
+            // If not owning store, preserve manifest for reload scenarios
+            Console.WriteLine($"[Phase 4] Preserving chunks for potential reload (ownsStore={ownsStore})");
+        }
 
         GC.SuppressFinalize(this);
     }
     ~VideoObject()
     {
-        if (!disposed && ownsStore && File.Exists(store))
-            File.Delete(store);
+        if (!disposed)
+        {
+            Dispose();
+        }
+    }
+
+    /// <summary>
+    /// Phase 4: Flush all dirty chunks to disk with compression.
+    /// Called during Dispose to ensure all modifications are persisted.
+    /// </summary>
+    private void FlushAllDirtyChunks()
+    {
+        if (manifest == null || cache == null)
+            return;
+
+        Console.WriteLine($"[Phase 4] Checking {manifest.Chunks.Count} chunks for dirty status...");
+        int dirtyCount = 0;
+
+        foreach (var chunk in manifest.Chunks)
+        {
+            if (chunk.IsDirty)
+            {
+                Console.WriteLine($"[Phase 4] Flushing dirty chunk {chunk.StartFrame}-{chunk.EndFrame}");
+                cache.FlushChunk(chunk.StartFrame, chunk.EndFrame);
+                dirtyCount++;
+            }
+        }
+
+        Console.WriteLine($"[Phase 4] Flushed {dirtyCount} dirty chunks");
     }
     public void SaveOutVideo(string ExportPath)
     {
@@ -150,6 +186,8 @@ public class VideoObject : IDisposable
     }
     private string MakeIntermediary(string videoPath)
     {
+        // Phase 3: Don't extract entire video upfront. Just return a path.
+        // Chunks will be extracted on-demand via ExtractChunk().
         string realpath = Path.Combine(Directory.GetCurrentDirectory(), videoPath);
         string tmpDir = Path.Combine(Directory.GetCurrentDirectory(), "tmp");
         string intermediaryPath = Path.Combine(
@@ -157,33 +195,103 @@ public class VideoObject : IDisposable
             Path.GetFileNameWithoutExtension(realpath) + ".seq"
         );
 
-        if (File.Exists(intermediaryPath))
-            return intermediaryPath;
+        // Phase 3: We don't create .seq anymore, just return the path for compatibility
+        // The actual video data will be lazily extracted from chunks.
+        return intermediaryPath;
+    }
 
-        // Use FFmpeg to extract raw pixel data
+    /// <summary>
+    /// Phase 3: Extract a chunk of frames from the source video using FFmpeg.
+    /// Only called on-demand when ReadBytes/WriteBytes accesses that chunk.
+    /// </summary>
+    private void ExtractChunk(uint startFrame, uint endFrame)
+    {
+        if (manifest == null || cache == null)
+            return;
+
+        // If no source video, skip extraction (data comes from store for sliced videos)
+        if (string.IsNullOrEmpty(source))
+            return;
+
+        // Check if chunk already exists
+        var existingChunk = manifest.FindChunkForFrame(startFrame);
+        if (existingChunk != null && existingChunk.StartFrame == startFrame && existingChunk.EndFrame == endFrame)
+        {
+            return;  // Already extracted
+        }
+
+        // Calculate time range for FFmpeg
+        float startTime = startFrame / fps;
+        float duration = (endFrame - startFrame) / fps;
+
+        Console.WriteLine($"[Phase 3] Extracting chunk frames {startFrame}-{endFrame} (time {startTime:F2}s - {startTime + duration:F2}s)");
+
+        // Use temporary file instead of pipe to avoid deadlock
+        string tmpChunkFile = Path.Combine(chunksDirectory, $"chunk_{startFrame}_{endFrame}.tmp");
+        Directory.CreateDirectory(chunksDirectory);
+
         var process = new System.Diagnostics.Process
         {
             StartInfo = new System.Diagnostics.ProcessStartInfo
             {
                 FileName = "ffmpeg",
-                Arguments = $"-i \"{realpath}\" -f rawvideo -pix_fmt rgba -",
-                RedirectStandardOutput = true,
+                Arguments = $"-y -ss {startTime:F2} -t {duration:F2} -i \"{source}\" -f rawvideo -pix_fmt rgba \"{tmpChunkFile}\" -hide_banner -loglevel warning",
+                RedirectStandardOutput = false,
+                RedirectStandardError = true,
                 UseShellExecute = false,
                 CreateNoWindow = true
             }
         };
 
+        Console.WriteLine($"[Phase 3] Starting FFmpeg extraction to {tmpChunkFile}");
         process.Start();
+        Console.WriteLine($"[Phase 3] Waiting for FFmpeg to exit...");
+        process.WaitForExit();
+        Console.WriteLine($"[Phase 3] FFmpeg exited with code {process.ExitCode}");
 
-        // Write raw bytes to intermediary file
-        using (var fs = File.Create(intermediaryPath))
+        if (process.ExitCode != 0)
         {
-            process.StandardOutput.BaseStream.CopyTo(fs);
+            string stderr = process.StandardError.ReadToEnd();
+            Console.WriteLine($"FFmpeg extraction failed: {stderr}");
+            if (File.Exists(tmpChunkFile)) File.Delete(tmpChunkFile);
+            return;
         }
 
-        process.WaitForExit();
+        // Read chunk from temp file
+        Console.WriteLine($"[Phase 3] Checking for output file: {tmpChunkFile}");
+        if (!File.Exists(tmpChunkFile))
+        {
+            Console.WriteLine($"[Phase 3] Extraction produced no output file");
+            return;
+        }
 
-        return intermediaryPath;
+        Console.WriteLine($"[Phase 3] Reading chunk file into memory...");
+        byte[] chunkData = File.ReadAllBytes(tmpChunkFile);
+        Console.WriteLine($"[Phase 3] Read {chunkData.Length} bytes, deleting temp file...");
+        File.Delete(tmpChunkFile);
+
+        Console.WriteLine($"[Phase 3] Extracted {chunkData.Length} bytes for chunk {startFrame}-{endFrame}");
+
+        // Store chunk in cache
+        Console.WriteLine($"[Phase 3] Storing chunk in cache...");
+        cache.SetChunk(startFrame, endFrame, chunkData);
+
+        // Create manifest entry
+        string hash = ChunkCache.ComputeHash(chunkData);
+        var entry = new ChunkEntry
+        {
+            StartFrame = startFrame,
+            EndFrame = endFrame,
+            UncompressedBytes = chunkData.Length,
+            CompressedBytes = 0,  // Will be set when flushed
+            Hash = hash,
+            IsDirty = true
+        };
+
+        Console.WriteLine($"[Phase 3] Adding chunk to manifest");
+        manifest.AddOrUpdateChunk(entry);
+        Console.WriteLine($"[Phase 3] Chunk extraction complete");
+
     }
     private (Vector2 res, float fps, float len) LoadVideoMetadata(string videoPath)
     {
@@ -269,29 +377,7 @@ public class VideoObject : IDisposable
 
         Console.WriteLine($"Saved frame to {filename}");
     }
-    private VideoObject(string name, string intermediaryPath, Vector2 resolution, uint fps, float length)
-    {
-        this.name = name;
-        source = string.Empty;
-        store = intermediaryPath;
-        this.resolution = resolution;
-        this.fps = fps;
-        this.length = length;
-    }
-    public static VideoObject MakeFromIntermediary(string intermediaryPath, Vector2 Resolution, uint fps)
-    {
-        int width = (int)Resolution.X;
-        int height = (int)Resolution.Y;
-        long fileBytes = new FileInfo(intermediaryPath).Length;
 
-        float length = fps > 0
-            ? fileBytes / (width * height * 4f * fps)
-            : 0f;
-
-        string name = Path.GetFileNameWithoutExtension(intermediaryPath);
-
-        return new VideoObject(name, intermediaryPath, Resolution, fps, length);
-    }
     public void Append(VideoObject other)
     {
         if (resolution != other.resolution)
@@ -300,10 +386,18 @@ public class VideoObject : IDisposable
         if (fps != other.fps)
             throw new InvalidOperationException("Videos must have the same fps to append.");
 
-        using var source = File.OpenRead(other.store);
-        using var output = new FileStream(store, FileMode.Append, FileAccess.Write);
+        // Calculate total frames from other video
+        long bytesPerFrame = (long)resolution.X * (long)resolution.Y * 4;
+        uint otherTotalFrames = (uint)(other.length * other.fps);
+        long totalBytes = bytesPerFrame * otherTotalFrames;
 
-        CopyExactly(source, output, source.Length);
+        // Read all data from other video via chunks (triggers lazy extraction if needed)
+        byte[] sourceData = other.ReadBytes(0, (int)Math.Min(int.MaxValue, totalBytes));
+
+        // Append our current size and write the data
+        uint currentTotalFrames = (uint)(length * fps);
+        long currentLength = bytesPerFrame * currentTotalFrames;
+        WriteBytes(currentLength, sourceData);
 
         length += other.length;
     }
@@ -324,11 +418,10 @@ public class VideoObject : IDisposable
         Directory.CreateDirectory(tmpDir);
         string outPath = Path.Combine(tmpDir, $"{name}_{startFrame}_{endFrame}.seq");
 
-        using var input = File.OpenRead(store);
+        // Read slice data via chunks (triggers lazy extraction if needed)
+        byte[] sliceData = ReadBytes(startByte, (int)Math.Min(int.MaxValue, bytesToCopy));
         using var output = new FileStream(outPath, FileMode.Create, FileAccess.Write);
-
-        input.Seek(startByte, SeekOrigin.Begin);
-        CopyExactly(input, output, bytesToCopy);
+        output.Write(sliceData, 0, sliceData.Length);
 
         return MakeFromIntermediary(outPath, resolution, (uint)fps, ownsStore: true);
     }
@@ -345,7 +438,178 @@ public class VideoObject : IDisposable
         }
     }
 
+    /// <summary>
+    /// Phase 2-3: Chunk-aware read. Loads data from compressed chunks via cache.
+    /// Lazily extracts chunks on first access.
+    /// </summary>
     public byte[] ReadBytes(long offset, int count)
+    {
+        if (count <= 0 || cache == null || manifest == null)
+            return Array.Empty<byte>();
+
+        long frameIndex = offset / ((long)resolution.X * (long)resolution.Y * 4);
+        uint frameIdxUint = (uint)frameIndex;
+
+        // Phase 3: Check if chunk exists; if not, extract it
+        var chunk = manifest.FindChunkForFrame(frameIdxUint);
+        if (chunk == null)
+        {
+            // No chunk for this frame, try to extract a default chunk size
+            // For now, extract 300 frames at a time (configurable)
+            uint chunkSize = 300;
+            uint chunkStart = (frameIdxUint / chunkSize) * chunkSize;
+            uint chunkEnd = Math.Min(chunkStart + chunkSize, (uint)(length * fps));
+            
+            if (chunkEnd > chunkStart)
+            {
+                ExtractChunk(chunkStart, chunkEnd);
+                chunk = manifest.FindChunkForFrame(frameIdxUint);
+            }
+        }
+
+        if (manifest.Chunks.Count == 0)
+        {
+            // Still no chunks, fall back to raw store
+            return ReadBytesFromRawStore(offset, count);
+        }
+
+        byte[] result = new byte[count];
+        long currentOffset = offset;
+        int bytesRead = 0;
+
+        while (bytesRead < count)
+        {
+            // Find chunk containing current offset
+            long loopFrameIndex = currentOffset / ((long)resolution.X * (long)resolution.Y * 4);
+            var loopChunk = manifest.FindChunkForFrame((uint)loopFrameIndex);
+
+            if (loopChunk == null)
+            {
+                // No chunk found, assume data doesn't exist
+                break;
+            }
+
+            try
+            {
+                // Load chunk via cache (decompresses if needed)
+                byte[] chunkData = cache.GetChunk(loopChunk);
+                
+                // Calculate position within chunk
+                long chunkStartByte = loopChunk.StartFrame * (long)resolution.X * (long)resolution.Y * 4;
+                long posInChunk = currentOffset - chunkStartByte;
+                long bytesAvailableInChunk = chunkData.Length - posInChunk;
+
+                if (bytesAvailableInChunk <= 0)
+                {
+                    break;  // No more data in this chunk
+                }
+
+                int toCopy = (int)Math.Min(bytesAvailableInChunk, count - bytesRead);
+                Array.Copy(chunkData, posInChunk, result, bytesRead, toCopy);
+
+                bytesRead += toCopy;
+                currentOffset += toCopy;
+            }
+            catch
+            {
+                // If chunk load fails, stop reading
+                break;
+            }
+        }
+
+        // Trim result if less data was read than requested
+        if (bytesRead < count)
+            Array.Resize(ref result, bytesRead);
+
+        return result;
+    }
+
+    /// <summary>
+    /// Phase 2-3: Chunk-aware write. Stores data in compressed chunks via cache.
+    /// Lazily extracts chunks on first access.
+    /// </summary>
+    public void WriteBytes(long offset, byte[] buffer)
+    {
+        if (buffer == null || buffer.Length == 0 || cache == null || manifest == null)
+            return;
+
+        long frameIndex = offset / ((long)resolution.X * (long)resolution.Y * 4);
+        uint frameIdxUint = (uint)frameIndex;
+
+        // Phase 3: Check if chunk exists; if not, extract it
+        var chunk = manifest.FindChunkForFrame(frameIdxUint);
+        if (chunk == null)
+        {
+            // No chunk for this frame, try to extract a default chunk size
+            uint chunkSize = 300;
+            uint chunkStart = (frameIdxUint / chunkSize) * chunkSize;
+            uint chunkEnd = Math.Min(chunkStart + chunkSize, (uint)(length * fps));
+            
+            if (chunkEnd > chunkStart)
+            {
+                ExtractChunk(chunkStart, chunkEnd);
+                chunk = manifest.FindChunkForFrame(frameIdxUint);
+            }
+        }
+
+        if (manifest.Chunks.Count == 0)
+        {
+            // Still no chunks, fall back to raw store
+            WriteBytesToRawStore(offset, buffer);
+            return;
+        }
+
+        long currentOffset = offset;
+        int bytesWritten = 0;
+
+        while (bytesWritten < buffer.Length)
+        {
+            // Find or create chunk for current offset
+            long loopFrameIndex = currentOffset / ((long)resolution.X * (long)resolution.Y * 4);
+            var loopChunk = manifest.FindChunkForFrame((uint)loopFrameIndex);
+
+            if (loopChunk == null)
+            {
+                // No chunk found, stop writing
+                break;
+            }
+
+            try
+            {
+                // Load chunk via cache
+                byte[] chunkData = cache.GetChunk(loopChunk);
+                
+                // Calculate position within chunk
+                long chunkStartByte = loopChunk.StartFrame * (long)resolution.X * (long)resolution.Y * 4;
+                long posInChunk = currentOffset - chunkStartByte;
+                long bytesAvailableInChunk = chunkData.Length - posInChunk;
+
+                if (bytesAvailableInChunk <= 0)
+                {
+                    break;  // No space in this chunk
+                }
+
+                int toCopy = (int)Math.Min(bytesAvailableInChunk, buffer.Length - bytesWritten);
+                Array.Copy(buffer, bytesWritten, chunkData, posInChunk, toCopy);
+
+                // Mark chunk as dirty (needs compression on flush)
+                cache.SetChunk(loopChunk.StartFrame, loopChunk.EndFrame, chunkData);
+
+                bytesWritten += toCopy;
+                currentOffset += toCopy;
+            }
+            catch
+            {
+                // If chunk write fails, stop
+                break;
+            }
+        }
+    }
+
+    /// <summary>
+    /// Fallback: Read directly from raw .seq file (Phase 2 compatibility).
+    /// </summary>
+    private byte[] ReadBytesFromRawStore(long offset, int count)
     {
         if (count <= 0)
             return Array.Empty<byte>();
@@ -372,7 +636,10 @@ public class VideoObject : IDisposable
         return buffer;
     }
 
-    public void WriteBytes(long offset, byte[] buffer)
+    /// <summary>
+    /// Fallback: Write directly to raw .seq file (Phase 2 compatibility).
+    /// </summary>
+    private void WriteBytesToRawStore(long offset, byte[] buffer)
     {
         if (buffer == null || buffer.Length == 0)
             return;
@@ -380,5 +647,26 @@ public class VideoObject : IDisposable
         using var stream = new FileStream(store, FileMode.OpenOrCreate, FileAccess.Write);
         stream.Seek(offset, SeekOrigin.Begin);
         stream.Write(buffer, 0, buffer.Length);
+    }
+
+    /// <summary>
+    /// Initialize chunk infrastructure: manifest and cache.
+    /// </summary>
+    private void InitializeChunks()
+    {
+        cache = new ChunkCache(chunksDirectory);
+        
+        string manifestPath = Path.Combine(chunksDirectory, $"{name}.manifest.json");
+        
+        if (File.Exists(manifestPath))
+        {
+            // Load existing manifest
+            manifest = ChunkManifest.Load(manifestPath);
+        }
+        else
+        {
+            // Create new manifest (chunks will be created later on demand)
+            manifest = ChunkManifest.Create(name, resolution, fps, (uint)(length * fps));
+        }
     }
 }
