@@ -6,6 +6,45 @@ using SixLabors.ImageSharp.PixelFormats;
 
 namespace Visive;
 
+// TODO: Memory-Efficient Chunked Video Architecture
+// Goal: Minimal RAM footprint with lazy-loaded, disk-compressed chunks
+// 
+// PHASE 1: Infrastructure
+// - [ ] Create ChunkManifest.cs
+//   - Serialize/deserialize chunk metadata (frame ranges, compression ratios, dirty flags)
+//   - JSON-based: name.manifest.json in chunks/ directory
+//   - Track: startFrame, endFrame, compressed size, uncompressed size, hash, isDirty
+// 
+// - [ ] Create ChunkCache.cs
+//   - Single chunk in memory max (decompress on demand)
+//   - Compress on evict (using System.IO.Compression.GzipStream)
+//   - Methods: GetChunk(index), SetChunk(index, data), Flush(), Clear()
+//   - Memory cap: ~50-100MB per VideoObject
+//
+// PHASE 2: Refactor VideoObject
+// - [ ] Replace MakeIntermediary to create manifest only (no full .seq extraction)
+// - [ ] Replace ReadBytes/WriteBytes to intercept I/O via ChunkCache
+// - [ ] Update Slice() to create new manifest pointing to chunk ranges
+// - [ ] Update Append() to chain manifests (virtual concatenation)
+// - [ ] Update SaveOutVideo() to stream-reconstruct from compressed chunks
+//
+// PHASE 3: Chunk Extraction Strategy
+// - [ ] Add ExtractChunk(chunkIndex) using ffmpeg -ss/-t
+//   - Seek to frame start time: (frame / fps)
+//   - Extract N frames: ffmpeg -ss {startTime} -t {duration} -f rawvideo -pix_fmt rgba ...
+//   - Compress and store in chunks/ directory
+// - [ ] Make extraction lazy: only on first ReadBytes/WriteBytes access
+//
+// PHASE 4: Disposal & Cleanup
+// - [ ] Flush dirty chunks on Dispose (compress and save)
+// - [ ] Delete chunks/ directory on ownsStore disposal
+// - [ ] Preserve manifest for reload (optional, for caching)
+//
+// Expected Results:
+// - Memory: Constant ~50-100MB regardless of video length
+// - Disk (chunks/): ~10-20% of raw .seq size (compressed)
+// - No monolithic .seq file on disk
+
 public class VideoObject : IDisposable
 {
     public readonly string name;
