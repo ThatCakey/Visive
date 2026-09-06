@@ -233,3 +233,4 @@ Testing/tmp/
 # dotnet temp
 /tmp_dotnet/
 **/NuGetScratch*/
+**.nettrace

@@ -835,7 +835,7 @@ public class VideoObject : IDisposable
 
         // Cap allocation to 500MB to avoid OutOfMemoryException with int.MaxValue arrays
         // Callers should loop if they need more data
-        const int MAX_BUFFER_SIZE = 500_000_000; // 500MB
+        const int MAX_BUFFER_SIZE = 1_000_000_000; // 500MB
         int actualCount = Math.Min(count, MAX_BUFFER_SIZE);
 
         Console.WriteLine($"[ReadBytes] Allocating {actualCount} bytes (requested {count})");
@@ -1147,7 +1147,7 @@ public class VideoObject : IDisposable
     /// </summary>
     private void CalculateChunkSize()
     {
-        const long targetMaxBytes = 100_000_000;  // 100MB target chunk size in RAM (accounts for multiple objects)
+        const long targetMaxBytes = 250_000_000;  // 200MB target chunk size in RAM (accounts for multiple objects)
         long bytesPerFrame = (long)resolution.X * (long)resolution.Y * 4;  // RGBA = 4 bytes
 
         if (bytesPerFrame <= 0)
