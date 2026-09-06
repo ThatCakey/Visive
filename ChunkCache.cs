@@ -3,6 +3,7 @@ using System.IO;
 using System.IO.Compression;
 using System.Security.Cryptography;
 using System.Text;
+using System.Linq;
 
 namespace Visive;
 
@@ -18,6 +19,7 @@ public class ChunkCache : IDisposable
     private bool currentChunkDirty;
     private readonly string chunksDirectory;
     private bool disposed;
+    private const long MAX_CACHE_SIZE_BYTES = 10L * 1024 * 1024 * 1024; // 10 GB
 
     public ChunkCache(string chunksDirectory)
     {
@@ -37,11 +39,16 @@ public class ChunkCache : IDisposable
         // Flush current chunk if dirty
         if (currentChunkDirty && currentChunkData != null && currentChunkStartFrame.HasValue)
             FlushChunk(currentChunkStartFrame.Value, currentChunkEndFrame ?? currentChunkStartFrame.Value);
+        else if (currentChunkData != null)
+            Clear(); // Clear clean chunk from RAM without writing
 
         // Load and decompress requested chunk
         string chunkPath = GetChunkPath(entry.StartFrame, entry.EndFrame);
         if (!File.Exists(chunkPath))
             throw new FileNotFoundException($"Chunk file not found: {chunkPath}");
+
+        // Update access time for LRU cache manager
+        File.SetLastAccessTimeUtc(chunkPath, DateTime.UtcNow);
 
         currentChunkData = DecompressChunk(chunkPath);
         currentChunkStartFrame = entry.StartFrame;
@@ -54,16 +61,18 @@ public class ChunkCache : IDisposable
     /// <summary>
     /// Set (modify) a chunk in cache. Marks it dirty for later compression.
     /// </summary>
-    public void SetChunk(uint startFrame, uint endFrame, byte[] data)
+    public void SetChunk(uint startFrame, uint endFrame, byte[] data, bool isDirty = true)
     {
         // Flush existing chunk if different and dirty
         if (currentChunkDirty && currentChunkStartFrame.HasValue && currentChunkStartFrame != startFrame)
             FlushChunk(currentChunkStartFrame.Value, currentChunkEndFrame ?? currentChunkStartFrame.Value);
+        else if (currentChunkStartFrame.HasValue && currentChunkStartFrame != startFrame)
+            Clear();
 
         currentChunkData = data;
         currentChunkStartFrame = startFrame;
         currentChunkEndFrame = endFrame;
-        currentChunkDirty = true;
+        currentChunkDirty = isDirty;
     }
 
     /// <summary>
@@ -72,7 +81,13 @@ public class ChunkCache : IDisposable
     public void FlushChunk(uint startFrame, uint endFrame)
     {
         if (!currentChunkDirty || currentChunkData == null)
+        {
+            Clear();
             return;
+        }
+
+        // Ensure we don't exceed 10GB limit before writing a new chunk
+        EnforceDiskLimit();
 
         string chunkPath = GetChunkPath(startFrame, endFrame);
         Directory.CreateDirectory(chunksDirectory);
@@ -83,6 +98,35 @@ public class ChunkCache : IDisposable
         // Clear memory cache after flushing to free RAM
         Console.WriteLine($"[ChunkCache] Cleared chunk {startFrame}-{endFrame} from memory after flushing");
         Clear();
+    }
+
+    private void EnforceDiskLimit()
+    {
+        if (!Directory.Exists(chunksDirectory)) return;
+
+        var files = new DirectoryInfo(chunksDirectory).GetFiles("*.gz");
+        long totalSize = files.Sum(f => f.Length);
+
+        if (totalSize <= MAX_CACHE_SIZE_BYTES) return;
+
+        Console.WriteLine($"[ChunkCache] Disk limit exceeded ({(totalSize / 1024 / 1024)}MB). Cleaning up...");
+        
+        // Sort by last access time (oldest first)
+        foreach (var file in files.OrderBy(f => f.LastAccessTimeUtc))
+        {
+            try
+            {
+                totalSize -= file.Length;
+                file.Delete();
+                Console.WriteLine($"[ChunkCache] Deleted {file.Name} to free space.");
+                if (totalSize <= MAX_CACHE_SIZE_BYTES)
+                    break;
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"[ChunkCache] Failed to delete {file.Name}: {ex.Message}");
+            }
+        }
     }
 
     /// <summary>
@@ -116,7 +160,8 @@ public class ChunkCache : IDisposable
     private void CompressChunk(byte[] data, string outputPath)
     {
         using var fs = File.Create(outputPath);
-        using var deflate = new System.IO.Compression.DeflateStream(fs, System.IO.Compression.CompressionMode.Compress);
+        // Using Fastest compression instead of default to prevent massive CPU blocking
+        using var deflate = new System.IO.Compression.DeflateStream(fs, System.IO.Compression.CompressionLevel.Fastest);
         deflate.Write(data, 0, data.Length);
     }
 

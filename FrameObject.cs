@@ -37,71 +37,46 @@ public class FrameObject
 
     Pixel[] loadFrameFromIntermediary(int width, int height, VideoObject video, uint frame)
     {
-        // Calculate bytes per frame and frame offset
-        int bytesPerFrame = width * height * 4;  // RGBA: 4 bytes per pixel
-        uint frameNumber = frame;
-        long frameOffset = frameNumber * bytesPerFrame;
-
+        int bytesPerFrame = width * height * 4;
         Pixel[] pixels = new Pixel[width * height];
+        byte[] buffer = new byte[bytesPerFrame];
+        
+        video.GetFrameData(frame, buffer);
 
-        using (var fs = File.OpenRead(video.store))  // Need to store this path
+        for (int i = 0; i < width * height; i++)
         {
-            fs.Seek(frameOffset, SeekOrigin.Begin);
+            int offset = i * 4;
+            byte r8 = buffer[offset];
+            byte g8 = buffer[offset + 1];
+            byte b8 = buffer[offset + 2];
+            byte a8 = buffer[offset + 3];
 
-            // Read raw RGBA data
-            byte[] buffer = new byte[bytesPerFrame];
-            fs.Read(buffer, 0, bytesPerFrame);
-
-            // Parse RGBA bytes into Pixel structs
-            for (int i = 0; i < width * height; i++)
+            pixels[i] = new Pixel
             {
-                int offset = i * 4;
-                byte r8 = buffer[offset];
-                byte g8 = buffer[offset + 1];
-                byte b8 = buffer[offset + 2];
-                byte a8 = buffer[offset + 3];
-
-                // Convert 8-bit to 10-bit
-                pixels[i] = new Pixel
-                {
-                    R = (ushort)(r8 << 2),  // Scale 0-255 to 0-1023
-                    G = (ushort)(g8 << 2),
-                    B = (ushort)(b8 << 2),
-                    alpha = a8
-                };
-            }
+                R = (ushort)(r8 << 2),
+                G = (ushort)(g8 << 2),
+                B = (ushort)(b8 << 2),
+                alpha = a8
+            };
         }
-
         return pixels;
     }
     public void SaveToIntermediary()
     {
         if (!loaded || pixels.Length <= 0) return;
 
-        // Calculate bytes per frame and frame offset
         int bytesPerFrame = (int)videoParent.resolution.X * (int)videoParent.resolution.Y * 4;
-        long frameOffset = (long)frame * bytesPerFrame;
-
-        // Create a buffer for the raw RGBA data
         byte[] buffer = new byte[bytesPerFrame];
 
-        // Parse Pixel structs back into RGBA bytes
         for (int i = 0; i < pixels.Length; i++)
         {
             int offset = i * 4;
-
-            // Convert 10-bit back to 8-bit by shifting right
             buffer[offset] = (byte)(pixels[i].R >> 2);
             buffer[offset + 1] = (byte)(pixels[i].G >> 2);
             buffer[offset + 2] = (byte)(pixels[i].B >> 2);
-            buffer[offset + 3] = pixels[i].alpha; // Alpha remained 8-bit
+            buffer[offset + 3] = pixels[i].alpha;
         }
 
-        // Open file with OpenOrCreate and Write access to overwrite just this frame
-        using (var fs = new FileStream(videoParent.store, FileMode.OpenOrCreate, FileAccess.Write))
-        {
-            fs.Seek(frameOffset, SeekOrigin.Begin);
-            fs.Write(buffer, 0, bytesPerFrame);
-        }
+        videoParent.SetFrameData(frame, buffer);
     }
 }

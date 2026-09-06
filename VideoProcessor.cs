@@ -38,6 +38,8 @@ public class VideoProcessor
         part2.SaveOutVideo(Environment.CurrentDirectory + $"/tmp/{obj.name}_Export.mp4");
 
                 watch.Lap("save");
+
+                Thread.Sleep(200);
                 watch.Cancel();
     }
 

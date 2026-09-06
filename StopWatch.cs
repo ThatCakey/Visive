@@ -5,6 +5,8 @@ public class StopWatch
     private CancellationTokenSource _cts = new();
     private bool lap = false;
     private string Message = "";
+    DateTime starttime;
+    DateTime lastLap;
 
     public Task StartWatch()
     {
@@ -14,12 +16,12 @@ public class StopWatch
 
     private async Task watch(CancellationToken token)
     {
-        DateTime starttime = DateTime.Now;
-        DateTime lastLap = starttime;
+        starttime = DateTime.Now;
+        lastLap = starttime;
 
-        while(_cts.IsCancellationRequested == false)
+        while (_cts.IsCancellationRequested == false)
         {
-            if(lap == true)
+            if (lap == true)
             {
                 lap = false;
                 Console.ForegroundColor = ConsoleColor.Green;
@@ -30,11 +32,11 @@ public class StopWatch
             }
             await Task.Delay(100, token);
         }
-        Console.WriteLine($"[Final Time] completed in {(DateTime.Now - starttime).TotalSeconds} Seconds");
     }
 
     public void Cancel()
     {
+        Console.WriteLine($"[Total] completed in {(DateTime.Now - starttime).TotalSeconds} Seconds");
         _cts?.Cancel();
     }
 
