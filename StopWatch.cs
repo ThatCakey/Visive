@@ -1,48 +1,31 @@
-﻿namespace Visive;
+using System;
+using System.Diagnostics;
+
+namespace Visive;
 
 public class StopWatch
 {
-    private CancellationTokenSource _cts = new();
-    private bool lap = false;
-    private string Message = "";
-    DateTime starttime;
-    DateTime lastLap;
+    private Stopwatch _sw = new Stopwatch();
+    private TimeSpan _lastLap;
 
-    public Task StartWatch()
+    public void StartWatch()
     {
-        _cts = new CancellationTokenSource();
-        return watch(_cts.Token);
-    }
-
-    private async Task watch(CancellationToken token)
-    {
-        starttime = DateTime.Now;
-        lastLap = starttime;
-
-        while (_cts.IsCancellationRequested == false)
-        {
-            if (lap == true)
-            {
-                lap = false;
-                Console.ForegroundColor = ConsoleColor.Green;
-                Console.WriteLine($"[{Message}] completed in {(DateTime.Now - lastLap).TotalSeconds} Seconds");
-                Console.ResetColor();
-                Message = "";
-                lastLap = DateTime.Now;
-            }
-            await Task.Delay(100, token);
-        }
+        _sw.Start();
+        _lastLap = TimeSpan.Zero;
     }
 
     public void Cancel()
     {
-        Console.WriteLine($"[Total] completed in {(DateTime.Now - starttime).TotalSeconds} Seconds");
-        _cts?.Cancel();
+        _sw.Stop();
+        Console.WriteLine($"[Total] completed in {_sw.Elapsed.TotalSeconds} Seconds");
     }
 
     public void Lap(string message)
     {
-        lap = true;
-        Message = message;
+        var current = _sw.Elapsed;
+        Console.ForegroundColor = ConsoleColor.Green;
+        Console.WriteLine($"[{message}] completed in {(current - _lastLap).TotalSeconds} Seconds");
+        Console.ResetColor();
+        _lastLap = current;
     }
 }

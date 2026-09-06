@@ -7,41 +7,62 @@ namespace Visive;
 public class FrameObject
 {
     public Pixel[] pixels;
+    public int width { get; private set; }
+    public int height { get; private set; }
     private uint frame;
-    private VideoObject videoParent;
+    private VideoObject? videoParent;
     public readonly bool loaded = false;
+
     public FrameObject(VideoObject video, float timecode)
     {
-        int width = (int)video.resolution.X;
-        int height = (int)video.resolution.Y;
+        width = (int)video.resolution.X;
+        height = (int)video.resolution.Y;
 
         this.frame = video.getFramefromTimecode(timecode);
         videoParent = video;
 
-        pixels = loadFrameFromIntermediary(width, height, video, this.frame);
+        pixels = LoadFrame(width, height, video, this.frame);
 
         loaded = true;
     }
+
     public FrameObject(VideoObject video, uint frame)
     {
-        int width = (int)video.resolution.X;
-        int height = (int)video.resolution.Y;
+        width = (int)video.resolution.X;
+        height = (int)video.resolution.Y;
 
         this.frame = frame;
         videoParent = video;
 
-        pixels = loadFrameFromIntermediary(width, height, video, this.frame);
+        pixels = LoadFrame(width, height, video, this.frame);
 
         loaded = true;
     }
 
-    Pixel[] loadFrameFromIntermediary(int width, int height, VideoObject video, uint frame)
+    public FrameObject(int width, int height, byte[] frameBuffer)
+    {
+        this.width = width;
+        this.height = height;
+        this.videoParent = null;
+        this.frame = 0;
+        
+        pixels = LoadFrameFromBuffer(width, height, frameBuffer);
+        loaded = true;
+    }
+
+    Pixel[] LoadFrame(int width, int height, VideoObject video, uint frame)
     {
         int bytesPerFrame = width * height * 4;
-        Pixel[] pixels = new Pixel[width * height];
         byte[] buffer = new byte[bytesPerFrame];
         
         video.GetFrameData(frame, buffer);
+
+        return LoadFrameFromBuffer(width, height, buffer);
+    }
+
+    Pixel[] LoadFrameFromBuffer(int width, int height, byte[] buffer)
+    {
+        Pixel[] pixels = new Pixel[width * height];
 
         for (int i = 0; i < width * height; i++)
         {
@@ -61,12 +82,21 @@ public class FrameObject
         }
         return pixels;
     }
-    public void SaveToIntermediary()
+
+    public void SaveFrame()
+    {
+        if (!loaded || pixels.Length <= 0 || videoParent == null) return;
+
+        int bytesPerFrame = width * height * 4;
+        byte[] buffer = new byte[bytesPerFrame];
+        WriteToBuffer(buffer);
+
+        videoParent.SetFrameData(frame, buffer);
+    }
+
+    public void WriteToBuffer(byte[] buffer)
     {
         if (!loaded || pixels.Length <= 0) return;
-
-        int bytesPerFrame = (int)videoParent.resolution.X * (int)videoParent.resolution.Y * 4;
-        byte[] buffer = new byte[bytesPerFrame];
 
         for (int i = 0; i < pixels.Length; i++)
         {
@@ -76,7 +106,5 @@ public class FrameObject
             buffer[offset + 2] = (byte)(pixels[i].B >> 2);
             buffer[offset + 3] = pixels[i].alpha;
         }
-
-        videoParent.SetFrameData(frame, buffer);
     }
 }
