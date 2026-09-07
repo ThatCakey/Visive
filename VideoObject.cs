@@ -14,6 +14,9 @@ public class VideoClip
     public uint TimelineStartFrame;
     public uint Length => SourceEndFrame - SourceStartFrame;
 
+    public Vector2 Resolution;
+    public Vector2 Position = Vector2.Zero;
+
     public List<VideoEffect> Effects { get; } = new List<VideoEffect>();
     public Action? OnEffectsChanged;
 
@@ -73,7 +76,8 @@ public class VideoObject : IDisposable
             SourcePath = absSource,
             SourceStartFrame = 0,
             SourceEndFrame = totalFrames,
-            TimelineStartFrame = 0
+            TimelineStartFrame = 0,
+            Resolution = res
         };
         initialClip.OnEffectsChanged += () => cache?.Clear();
         clips.Add(initialClip);
@@ -240,7 +244,9 @@ public class VideoObject : IDisposable
                     SourcePath = clip.SourcePath,
                     SourceStartFrame = clip.SourceStartFrame + offsetInClip,
                     SourceEndFrame = clip.SourceStartFrame + offsetInClip + (overlapEnd - overlapStart),
-                    TimelineStartFrame = currentTimelineFrame
+                    TimelineStartFrame = currentTimelineFrame,
+                    Resolution = clip.Resolution,
+                    Position = clip.Position
                 };
                 foreach (var effect in clip.Effects) newClip.Effects.Add(effect);
                 newClip.OnEffectsChanged += () => sliced.cache?.Clear();
@@ -279,19 +285,19 @@ public class VideoObject : IDisposable
 
     public void Append(VideoObject other)
     {
-        if (resolution != other.resolution || fps != other.fps)
-            throw new InvalidOperationException("Videos must have same resolution and fps.");
-
         uint currentTotalFrames = (uint)(length * fps);
+        float fpsRatio = this.fps / other.fps;
 
         foreach (var clip in other.clips)
         {
             var newClip = new VideoClip
             {
                 SourcePath = clip.SourcePath,
-                SourceStartFrame = clip.SourceStartFrame,
-                SourceEndFrame = clip.SourceEndFrame,
-                TimelineStartFrame = currentTotalFrames + clip.TimelineStartFrame
+                SourceStartFrame = (uint)Math.Round(clip.SourceStartFrame * fpsRatio),
+                SourceEndFrame = (uint)Math.Round(clip.SourceEndFrame * fpsRatio),
+                TimelineStartFrame = currentTotalFrames + (uint)Math.Round(clip.TimelineStartFrame * fpsRatio),
+                Resolution = clip.Resolution,
+                Position = clip.Position
             };
             foreach (var effect in clip.Effects) newClip.Effects.Add(effect);
             newClip.OnEffectsChanged += () => cache?.Clear();
@@ -390,18 +396,20 @@ public class VideoObject : IDisposable
 
                 uint sourceStart = clip.SourceStartFrame + (overlapStart - clip.TimelineStartFrame);
                 float startTimeSec = sourceStart / fps;
-                float durationSec = (overlapEnd - overlapStart) / fps;
+                uint expectedFrames = overlapEnd - overlapStart;
 
                 string tmpDir = Path.Combine(Directory.GetCurrentDirectory(), "tmp");
                 Directory.CreateDirectory(tmpDir);
                 string tmpRaw = Path.Combine(tmpDir, $"extract_{overlapStart}_{overlapEnd}.raw");
+
+                string filterComplex = $"[1:v]scale={(int)clip.Resolution.X}:{(int)clip.Resolution.Y},setpts=PTS-STARTPTS[scaled]; [0:v][scaled]overlay={clip.Position.X}:{clip.Position.Y}:shortest=1[out]";
 
                 var process = new System.Diagnostics.Process
                 {
                     StartInfo = new System.Diagnostics.ProcessStartInfo
                     {
                         FileName = "ffmpeg",
-                        Arguments = $"-y -ss {startTimeSec:F3} -t {durationSec:F3} -i \"{clip.SourcePath}\" -f rawvideo -pix_fmt rgba -s {(int)resolution.X}x{(int)resolution.Y} -r {fps} \"{tmpRaw}\" -hide_banner -loglevel error",
+                        Arguments = $"-y -f lavfi -i \"color=black@0:s={(int)resolution.X}x{(int)resolution.Y}:r={fps}\" -ss {startTimeSec:F3} -i \"{clip.SourcePath}\" -filter_complex \"{filterComplex}\" -map \"[out]\" -vframes {expectedFrames} -f rawvideo -pix_fmt rgba -r {fps} \"{tmpRaw}\" -hide_banner -loglevel error",
                         UseShellExecute = false,
                         CreateNoWindow = true
                     }

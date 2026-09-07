@@ -17,7 +17,9 @@ public class StopWatch
     public void Cancel()
     {
         _sw.Stop();
+        Console.ForegroundColor = ConsoleColor.Green;
         Console.WriteLine($"[Total] completed in {_sw.Elapsed.TotalSeconds} Seconds");
+        Console.ResetColor();
     }
 
     public void Lap(string message)
