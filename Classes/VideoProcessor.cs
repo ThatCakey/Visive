@@ -50,7 +50,7 @@ public class VideoProcessor
 
         // 2. Cache Hit + Nearest-Neighbor Downscaling
         watch.Lap("start preview cache hit");
-        var previewFrame2 = part1.GetPreviewFrame(2.04f, 0.5f, true); // 2.04s in (1 frame later)
+        var previewFrame2 = part1.GetPreviewFrame(12.04f, 0.5f); // 12.04s in (hits second clip with effect)
         watch.Lap("AFAP preview (cache hit)");
         Console.WriteLine($"Preview Frame Extracted: {previewFrame2.width}x{previewFrame2.height}");
 
