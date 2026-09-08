@@ -59,6 +59,8 @@ public class VideoObject : IDisposable
     private ChunkCache? cache;
     private readonly string chunksDirectory;
     private uint calculatedChunkSize;
+    
+    private readonly HashSet<uint> extractingChunks = new HashSet<uint>();
 
     public VideoObject(string Name, string Source)
     {
@@ -378,92 +380,109 @@ public class VideoObject : IDisposable
         cache.SetChunk(loopChunk.StartFrame, loopChunk.EndFrame, chunkData, isDirty: true);
     }
 
+    private readonly System.Collections.Concurrent.ConcurrentDictionary<uint, object> chunkLocks = new();
+
     private void ExtractChunk(uint startFrame, uint endFrame)
     {
         if (manifest == null || cache == null) return;
 
-        long bytesPerFrame = (long)resolution.X * (long)resolution.Y * 4;
-        long totalBytes = (endFrame - startFrame) * bytesPerFrame;
-        byte[] chunkData = new byte[totalBytes];
-
-        foreach (var clip in clips)
+        object chunkLock = chunkLocks.GetOrAdd(startFrame, _ => new object());
+        
+        lock (chunkLock)
         {
-            uint clipEnd = clip.TimelineStartFrame + clip.Length;
-            if (startFrame < clipEnd && endFrame > clip.TimelineStartFrame)
+            // Double-check if the chunk was extracted while we were waiting for the lock
+            var checkChunk = manifest.FindChunkForFrame(startFrame);
+            if (checkChunk != null && !checkChunk.IsDirty)
             {
-                uint overlapStart = Math.Max(startFrame, clip.TimelineStartFrame);
-                uint overlapEnd = Math.Min(endFrame, clipEnd);
+                return; // Another thread already extracted it!
+            }
 
-                uint sourceStart = clip.SourceStartFrame + (overlapStart - clip.TimelineStartFrame);
-                float startTimeSec = sourceStart / fps;
-                uint expectedFrames = overlapEnd - overlapStart;
+            long bytesPerFrame = (long)resolution.X * (long)resolution.Y * 4;
+            long totalBytes = (endFrame - startFrame) * bytesPerFrame;
+            byte[] chunkData = new byte[totalBytes];
 
-                string tmpDir = Path.Combine(Directory.GetCurrentDirectory(), "tmp");
-                Directory.CreateDirectory(tmpDir);
-                string tmpRaw = Path.Combine(tmpDir, $"extract_{overlapStart}_{overlapEnd}.raw");
-
-                string filterComplex = $"[1:v]scale={(int)clip.Resolution.X}:{(int)clip.Resolution.Y},setpts=PTS-STARTPTS[scaled]; [0:v][scaled]overlay={clip.Position.X}:{clip.Position.Y}:shortest=1[out]";
-
-                var process = new System.Diagnostics.Process
+            foreach (var clip in clips)
+            {
+                uint clipEnd = clip.TimelineStartFrame + clip.Length;
+                if (startFrame < clipEnd && endFrame > clip.TimelineStartFrame)
                 {
-                    StartInfo = new System.Diagnostics.ProcessStartInfo
+                    uint overlapStart = Math.Max(startFrame, clip.TimelineStartFrame);
+                    uint overlapEnd = Math.Min(endFrame, clipEnd);
+
+                    uint sourceStart = clip.SourceStartFrame + (overlapStart - clip.TimelineStartFrame);
+                    float startTimeSec = sourceStart / fps;
+                    uint expectedFrames = overlapEnd - overlapStart;
+
+                    string tmpDir = Path.Combine(Directory.GetCurrentDirectory(), "tmp");
+                    Directory.CreateDirectory(tmpDir);
+                    string tmpRaw = Path.Combine(tmpDir, $"extract_{overlapStart}_{overlapEnd}_{clip.GetHashCode()}.raw");
+
+                    string filterComplex = $"[1:v]scale={(int)clip.Resolution.X}:{(int)clip.Resolution.Y},setpts=PTS-STARTPTS[scaled]; [0:v][scaled]overlay={clip.Position.X}:{clip.Position.Y}:shortest=1[out]";
+
+                    var process = new System.Diagnostics.Process
                     {
-                        FileName = "ffmpeg",
-                        Arguments = $"-y -f lavfi -i \"color=black@0:s={(int)resolution.X}x{(int)resolution.Y}:r={fps}\" -ss {startTimeSec:F3} -i \"{clip.SourcePath}\" -filter_complex \"{filterComplex}\" -map \"[out]\" -vframes {expectedFrames} -f rawvideo -pix_fmt rgba -r {fps} \"{tmpRaw}\" -hide_banner -loglevel error",
-                        UseShellExecute = false,
-                        CreateNoWindow = true
-                    }
-                };
-                process.Start();
-                process.WaitForExit();
-
-                if (File.Exists(tmpRaw))
-                {
-                    byte[] rawData = File.ReadAllBytes(tmpRaw);
-
-                    if (clip.Effects.Count > 0)
-                    {
-                        int bytesPerSingleFrame = (int)resolution.X * (int)resolution.Y * 4;
-                        int framesExtracted = rawData.Length / bytesPerSingleFrame;
-
-                        for (int i = 0; i < framesExtracted; i++)
+                        StartInfo = new System.Diagnostics.ProcessStartInfo
                         {
-                            byte[] frameBuffer = new byte[bytesPerSingleFrame];
-                            Array.Copy(rawData, i * bytesPerSingleFrame, frameBuffer, 0, bytesPerSingleFrame);
-
-                            var frameObj = new FrameObject((int)resolution.X, (int)resolution.Y, frameBuffer);
-
-                            foreach (var effect in clip.Effects)
-                            {
-                                frameObj = effect.Process(frameObj);
-                            }
-
-                            frameObj.WriteToBuffer(frameBuffer);
-                            Array.Copy(frameBuffer, 0, rawData, i * bytesPerSingleFrame, bytesPerSingleFrame);
+                            FileName = "ffmpeg",
+                            Arguments = $"-y -f lavfi -i \"color=black@0:s={(int)resolution.X}x{(int)resolution.Y}:r={fps}\" -ss {startTimeSec:F3} -i \"{clip.SourcePath}\" -filter_complex \"{filterComplex}\" -map \"[out]\" -vframes {expectedFrames} -f rawvideo -pix_fmt rgba -r {fps} \"{tmpRaw}\" -hide_banner -loglevel error",
+                            UseShellExecute = false,
+                            CreateNoWindow = true
                         }
-                    }
+                    };
+                    process.Start();
+                    process.WaitForExit();
 
-                    long offsetInChunk = (overlapStart - startFrame) * bytesPerFrame;
-                    long copyLen = Math.Min(rawData.Length, chunkData.Length - offsetInChunk);
-                    Array.Copy(rawData, 0, chunkData, offsetInChunk, copyLen);
-                    File.Delete(tmpRaw);
+                    if (File.Exists(tmpRaw))
+                    {
+                        byte[] rawData = File.ReadAllBytes(tmpRaw);
+
+                        if (clip.Effects.Count > 0)
+                        {
+                            int bytesPerSingleFrame = (int)resolution.X * (int)resolution.Y * 4;
+                            int framesExtracted = rawData.Length / bytesPerSingleFrame;
+
+                            for (int i = 0; i < framesExtracted; i++)
+                            {
+                                byte[] frameBuffer = new byte[bytesPerSingleFrame];
+                                Array.Copy(rawData, i * bytesPerSingleFrame, frameBuffer, 0, bytesPerSingleFrame);
+
+                                var frameObj = new FrameObject((int)resolution.X, (int)resolution.Y, frameBuffer);
+
+                                foreach (var effect in clip.Effects)
+                                {
+                                    frameObj = effect.Process(frameObj);
+                                }
+
+                                frameObj.WriteToBuffer(frameBuffer);
+                                Array.Copy(frameBuffer, 0, rawData, i * bytesPerSingleFrame, bytesPerSingleFrame);
+                            }
+                        }
+
+                        long offsetInChunk = (overlapStart - startFrame) * bytesPerFrame;
+                        long copyLen = Math.Min(rawData.Length, chunkData.Length - offsetInChunk);
+                        Array.Copy(rawData, 0, chunkData, offsetInChunk, copyLen);
+                        File.Delete(tmpRaw);
+                    }
                 }
             }
+
+            lock (cache)
+            {
+                cache.SetChunk(startFrame, endFrame, chunkData, true);
+            }
+
+            string hash = ChunkCache.ComputeHash(chunkData);
+            var entry = new ChunkEntry
+            {
+                StartFrame = startFrame,
+                EndFrame = endFrame,
+                UncompressedBytes = chunkData.Length,
+                CompressedBytes = 0,
+                Hash = hash,
+                IsDirty = false
+            };
+            manifest.AddOrUpdateChunk(entry);
         }
-
-        cache.SetChunk(startFrame, endFrame, chunkData, false);
-
-        string hash = ChunkCache.ComputeHash(chunkData);
-        var entry = new ChunkEntry
-        {
-            StartFrame = startFrame,
-            EndFrame = endFrame,
-            UncompressedBytes = chunkData.Length,
-            CompressedBytes = 0,
-            Hash = hash,
-            IsDirty = false
-        };
-        manifest.AddOrUpdateChunk(entry);
     }
 
     public byte[] ReadBytes(long offset, int count)
@@ -492,7 +511,11 @@ public class VideoObject : IDisposable
 
             if (loopChunk == null || cache == null) break;
 
-            byte[] chunkData = cache.GetChunk(loopChunk);
+            byte[] chunkData;
+            lock (cache)
+            {
+                chunkData = cache.GetChunk(loopChunk);
+            }
             long chunkStartByte = (long)loopChunk.StartFrame * bytesPerFrame;
             long chunkEndByte = (long)loopChunk.EndFrame * bytesPerFrame;
 
@@ -609,6 +632,108 @@ public class VideoObject : IDisposable
     public FrameObject getFrame(uint frameNumber)
     {
         return new FrameObject(this, frameNumber);
+    }
+
+    public FrameObject GetPreviewFrame(float timecode, float quality = 1.0f, bool keyframeOnly = false)
+    {
+        uint frame = getFramefromTimecode(timecode);
+        return GetPreviewFrame(frame, quality, keyframeOnly);
+    }
+
+    public FrameObject GetPreviewFrame(uint frame, float quality = 1.0f, bool keyframeOnly = false)
+    {
+        int scaledW = (int)Math.Max(1, resolution.X * quality);
+        int scaledH = (int)Math.Max(1, resolution.Y * quality);
+
+        // Fast Path: Check if cached
+        var loopChunk = manifest?.FindChunkForFrame(frame);
+        if (loopChunk != null && cache != null && !loopChunk.IsDirty)
+        {
+            byte[] buffer = new byte[(int)resolution.X * (int)resolution.Y * 4];
+            GetFrameData(frame, buffer);
+            var frameObj = new FrameObject((int)resolution.X, (int)resolution.Y, buffer);
+            if (Math.Abs(quality - 1.0f) > 0.01f)
+            {
+                return frameObj.Resize(scaledW, scaledH);
+            }
+            return frameObj;
+        }
+
+        // Slow Path: Cache Miss - Prefetch asynchronously
+        uint chunkStart = (frame / calculatedChunkSize) * calculatedChunkSize;
+        uint chunkEnd = Math.Min(chunkStart + calculatedChunkSize, (uint)(length * fps));
+        
+        lock (extractingChunks)
+        {
+            if (chunkEnd > chunkStart && !extractingChunks.Contains(chunkStart))
+            {
+                extractingChunks.Add(chunkStart);
+                Task.Run(() => 
+                {
+                    try {
+                        ExtractChunk(chunkStart, chunkEnd);
+                    } finally {
+                        lock(extractingChunks) { extractingChunks.Remove(chunkStart); }
+                    }
+                });
+            }
+        }
+
+        // Extract single frame AFAP
+        int bytesPerFrame = scaledW * scaledH * 4;
+        byte[] frameData = new byte[bytesPerFrame];
+
+        foreach (var clip in clips)
+        {
+            uint clipEnd = clip.TimelineStartFrame + clip.Length;
+            if (frame >= clip.TimelineStartFrame && frame < clipEnd)
+            {
+                uint sourceStart = clip.SourceStartFrame + (frame - clip.TimelineStartFrame);
+                float startTimeSec = sourceStart / fps;
+
+                string tmpDir = Path.Combine(Directory.GetCurrentDirectory(), "tmp");
+                Directory.CreateDirectory(tmpDir);
+                string tmpRaw = Path.Combine(tmpDir, $"preview_{frame}_{clip.GetHashCode()}.raw");
+
+                string filterComplex = $"[1:v]scale={(int)(clip.Resolution.X * quality)}:{(int)(clip.Resolution.Y * quality)},setpts=PTS-STARTPTS[scaled]; [0:v][scaled]overlay={(int)(clip.Position.X * quality)}:{(int)(clip.Position.Y * quality)}:shortest=1[out]";
+                string skipArgs = keyframeOnly ? "-skip_frame nokey " : "";
+
+                var process = new System.Diagnostics.Process
+                {
+                    StartInfo = new System.Diagnostics.ProcessStartInfo
+                    {
+                        FileName = "ffmpeg",
+                        Arguments = $"-y -f lavfi -i \"color=black@0:s={scaledW}x{scaledH}:r={fps}\" {skipArgs}-ss {startTimeSec:F3} -i \"{clip.SourcePath}\" -filter_complex \"{filterComplex}\" -map \"[out]\" -vframes 1 -f rawvideo -pix_fmt rgba -r {fps} \"{tmpRaw}\" -hide_banner -loglevel error",
+                        UseShellExecute = false,
+                        CreateNoWindow = true
+                    }
+                };
+                process.Start();
+                process.WaitForExit();
+
+                if (File.Exists(tmpRaw))
+                {
+                    byte[] rawData = File.ReadAllBytes(tmpRaw);
+
+                    if (clip.Effects.Count > 0)
+                    {
+                        var frameObj = new FrameObject(scaledW, scaledH, rawData);
+                        foreach (var effect in clip.Effects)
+                        {
+                            frameObj = effect.Process(frameObj);
+                        }
+                        frameObj.WriteToBuffer(rawData);
+                    }
+
+                    long copyLen = Math.Min(rawData.Length, frameData.Length);
+                    // Simple overwrite layering (matching ExtractChunk's current behavior)
+                    Array.Copy(rawData, 0, frameData, 0, copyLen);
+                    File.Delete(tmpRaw);
+                }
+            }
+        }
+
+        return new FrameObject(scaledW, scaledH, frameData);
     }
 
     public uint getFramefromTimecode(float timecode)
