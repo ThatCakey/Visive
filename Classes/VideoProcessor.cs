@@ -32,29 +32,43 @@ public class VideoProcessor
         part1.clips[1].Resolution = new Vector2(1280, 720); // Scale it up
         part1.clips[1].Position = new Vector2(100, 100);    // Offset it from top-left
 
-        // Add a visual effect to prove it works
-        part1.clips[1].AddEffect(new SwapRedAndGreen());
+        // Stacking Test: Create a Picture-in-Picture Overlay
+        var overlayTrack = obj2.Slice(2f, 5f); // 3s clip
+        overlayTrack.PrependEmpty(2f); // Offset by 2 seconds so it starts at 2s
+        
+        // Make it a smaller PiP window in the top left corner
+        overlayTrack.clips[0].Resolution = new System.Numerics.Vector2(640, 360);
+        overlayTrack.clips[0].Position = new System.Numerics.Vector2(50, 50);
+        
+        // Add an effect exclusively to the overlay
+        overlayTrack.clips[0].AddEffect(new SwapRedAndGreen());
+        
+        // Stack it on the main track
+        part1.Overlays.Add(overlayTrack);
 
         // --- PREVIEW API BENCHMARKS ---
         Console.WriteLine("\n--- Preview API Benchmarks ---");
         
-        // 1. Cache Miss + Async Prefetch
+        // 1. Cache Miss + 50% Quality Downscaling (Includes Overlay Blending!)
         watch.Lap("start preview cache miss");
-        var previewFrame = part1.GetPreviewFrame(2.0f, 0.5f, true); // 2 seconds in, half res
+        var previewFrame = part1.GetPreviewFrame(4.0f, 0.5f); // 4.0s in (hits overlay!)
         watch.Lap("AFAP preview (cache miss)");
         Console.WriteLine($"Preview Frame Extracted: {previewFrame.width}x{previewFrame.height}");
+        previewFrame.ExportToPng(Path.Combine(Directory.GetCurrentDirectory(), "tmp", "OverlayPreviewTest.png"));
 
-        // Wait a brief moment to allow the background prefetch to finish
+        // Wait a brief moment to allow background cache prefetch to complete
         Console.WriteLine("Waiting 500ms for background prefetch to complete...");
         System.Threading.Thread.Sleep(500);
 
-        // 2. Cache Hit + Nearest-Neighbor Downscaling
+        // 2. Cache Hit + Nearest-Neighbor Downscaling (Includes Overlay Blending!)
         watch.Lap("start preview cache hit");
-        var previewFrame2 = part1.GetPreviewFrame(12.04f, 0.5f); // 12.04s in (hits second clip with effect)
+        var previewFrame2 = part1.GetPreviewFrame(4.04f, 0.5f); // 4.04s in
         watch.Lap("AFAP preview (cache hit)");
         Console.WriteLine($"Preview Frame Extracted: {previewFrame2.width}x{previewFrame2.height}");
 
-        previewFrame.ExportToPng(Environment.CurrentDirectory + $"/tmp/PreviewTest.png");
+        Console.WriteLine("------------------------------\n");
+
+        part1.SaveOutVideo(Path.Combine(Directory.GetCurrentDirectory(), "tmp", "test_Export.mp4"));
         previewFrame2.ExportToPng(Environment.CurrentDirectory + $"/tmp/PreviewTest2.png");
 
         Console.WriteLine("------------------------------\n");

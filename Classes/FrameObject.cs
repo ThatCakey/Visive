@@ -133,6 +133,22 @@ public class FrameObject
         return new FrameObject(newWidth, newHeight, newBuffer);
     }
 
+    public FrameObject Blend(FrameObject overlay)
+    {
+        if (width != overlay.width || height != overlay.height) return this;
+
+        int bytesPerFrame = width * height * 4;
+        byte[] baseBuffer = new byte[bytesPerFrame];
+        WriteToBuffer(baseBuffer);
+
+        byte[] overlayBuffer = new byte[bytesPerFrame];
+        overlay.WriteToBuffer(overlayBuffer);
+
+        VideoObject.BlendBuffers(baseBuffer, overlayBuffer);
+
+        return new FrameObject(width, height, baseBuffer);
+    }
+
     public void ExportToPng(string path)
     {
         if (!loaded || pixels.Length <= 0) return;

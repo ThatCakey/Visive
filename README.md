@@ -17,6 +17,16 @@ dotnet add reference /path/to/Visive/Visive.csproj
 ```
 *Note: Ensure `ffmpeg` and `ffprobe` are installed and accessible via your system's PATH.*
 
+### Global Configuration
+You can configure global engine limits (such as the background chunk cache size limit) at any point in your application lifecycle:
+
+```csharp
+using Visive;
+
+// Change the chunk disk cache limit to 20 GB (default is 10 GB)
+ChunkCache.MaxCacheSizeBytes = 20L * 1024 * 1024 * 1024;
+```
+
 ## Usage and User-Facing Components
 
 The primary component you will interact with is the `VideoObject`. This represents your virtual timeline.

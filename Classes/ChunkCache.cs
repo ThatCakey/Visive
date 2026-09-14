@@ -19,7 +19,7 @@ public class ChunkCache : IDisposable
     private bool currentChunkDirty;
     private readonly string chunksDirectory;
     private bool disposed;
-    private const long MAX_CACHE_SIZE_BYTES = 10L * 1024 * 1024 * 1024; // 10 GB
+    public static long MaxCacheSizeBytes { get; set; } = 10L * 1024 * 1024 * 1024; // 10 GB default
 
     public ChunkCache(string chunksDirectory)
     {
@@ -107,7 +107,7 @@ public class ChunkCache : IDisposable
         var files = new DirectoryInfo(chunksDirectory).GetFiles("*.gz");
         long totalSize = files.Sum(f => f.Length);
 
-        if (totalSize <= MAX_CACHE_SIZE_BYTES) return;
+        if (totalSize <= MaxCacheSizeBytes) return;
 
         Console.WriteLine($"[ChunkCache] Disk limit exceeded ({(totalSize / 1024 / 1024)}MB). Cleaning up...");
         
@@ -119,7 +119,7 @@ public class ChunkCache : IDisposable
                 totalSize -= file.Length;
                 file.Delete();
                 Console.WriteLine($"[ChunkCache] Deleted {file.Name} to free space.");
-                if (totalSize <= MAX_CACHE_SIZE_BYTES)
+                if (totalSize <= MaxCacheSizeBytes)
                     break;
             }
             catch (Exception ex)

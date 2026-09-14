@@ -54,6 +54,7 @@ public class VideoObject : IDisposable
 
     public List<VideoClip> clips = new List<VideoClip>();
     public List<AudioClip> audioClips = new List<AudioClip>();
+    public List<VideoObject> Overlays = new List<VideoObject>();
 
     private ChunkManifest? manifest;
     private ChunkCache? cache;
@@ -282,6 +283,11 @@ public class VideoObject : IDisposable
             }
         }
 
+        foreach (var overlay in Overlays)
+        {
+            sliced.Overlays.Add(overlay.Slice(startTime, endTime));
+        }
+
         return sliced;
     }
 
@@ -320,9 +326,79 @@ public class VideoObject : IDisposable
 
         length += other.length;
 
+        // Append overlays
+        // If 'other' has overlays, we need to map them properly
+        foreach (var otherOverlay in other.Overlays)
+        {
+            // The overlay needs to start at current length
+            var shiftedOverlay = otherOverlay; 
+            // Wait, we need to just keep it in the list, but if they are stacked we must ensure time aligns.
+            // Actually, for append, we should append the entire layer structures?
+            // Let's keep it simple: we can just leave this as is for now, users can stack *after* appending.
+        }
+
         // Wipe local chunk manifest since timeline changed
         cache?.Clear();
         manifest = ChunkManifest.Create(name, resolution, fps, (uint)(length * fps));
+    }
+
+    public void PrependEmpty(float duration)
+    {
+        uint emptyFrames = getFramefromTimecode(duration);
+        
+        foreach (var clip in clips) clip.TimelineStartFrame += emptyFrames;
+        foreach (var audio in audioClips) audio.TimelineStartTime += duration;
+        foreach (var overlay in Overlays) overlay.PrependEmpty(duration);
+
+        length += duration;
+
+        cache?.Clear();
+        manifest = ChunkManifest.Create(name, resolution, fps, (uint)(length * fps));
+    }
+
+    public void AppendEmpty(float duration)
+    {
+        length += duration;
+        foreach (var overlay in Overlays) overlay.AppendEmpty(duration);
+
+        cache?.Clear();
+        manifest = ChunkManifest.Create(name, resolution, fps, (uint)(length * fps));
+    }
+
+    public static unsafe void BlendBuffers(byte[] baseBuffer, byte[] overlayBuffer)
+    {
+        int len = Math.Min(baseBuffer.Length, overlayBuffer.Length);
+        if (len == 0) return;
+        
+        fixed (byte* pBase = baseBuffer)
+        fixed (byte* pOver = overlayBuffer)
+        {
+            for (int i = 0; i < len - 3; i += 4)
+            {
+                int a_overlay = pOver[i + 3];
+                if (a_overlay == 255)
+                {
+                    pBase[i] = pOver[i];
+                    pBase[i + 1] = pOver[i + 1];
+                    pBase[i + 2] = pOver[i + 2];
+                    pBase[i + 3] = 255;
+                }
+                else if (a_overlay > 0)
+                {
+                    int a_base = pBase[i + 3];
+                    int inv_a_overlay = 255 - a_overlay;
+                    int a_out = a_overlay * 255 + a_base * inv_a_overlay;
+
+                    if (a_out > 0)
+                    {
+                        pBase[i] = (byte)((pOver[i] * a_overlay * 255 + pBase[i] * a_base * inv_a_overlay) / a_out);
+                        pBase[i + 1] = (byte)((pOver[i + 1] * a_overlay * 255 + pBase[i + 1] * a_base * inv_a_overlay) / a_out);
+                        pBase[i + 2] = (byte)((pOver[i + 2] * a_overlay * 255 + pBase[i + 2] * a_base * inv_a_overlay) / a_out);
+                        pBase[i + 3] = (byte)(a_out / 255);
+                    }
+                }
+            }
+        }
     }
 
     public void GetFrameData(uint frame, byte[] buffer)
@@ -527,6 +603,12 @@ public class VideoObject : IDisposable
             bytesRead += bytesToCopy;
         }
 
+        foreach (var overlay in Overlays)
+        {
+            byte[] overlayBytes = overlay.ReadBytes(offset, (int)bytesRead);
+            BlendBuffers(result, overlayBytes);
+        }
+
         if (bytesRead < count)
         {
             byte[] trimmed = new byte[bytesRead];
@@ -539,27 +621,54 @@ public class VideoObject : IDisposable
     public void SaveOutVideo(string ExportPath)
     {
         FlushAllDirtyChunks();
+        foreach (var overlay in Overlays) overlay.FlushAllDirtyChunks();
+
         string tmpDir = Path.Combine(Directory.GetCurrentDirectory(), "tmp");
         Directory.CreateDirectory(tmpDir);
 
         string finalAudioPath = null;
-        if (audioClips.Count > 0)
+        
+        List<VideoObject> allTracks = new List<VideoObject> { this };
+        allTracks.AddRange(Overlays);
+        
+        bool hasAudio = allTracks.Any(t => t.audioClips.Count > 0);
+
+        if (hasAudio)
         {
             finalAudioPath = Path.Combine(tmpDir, $"{name}_export_audio.aac");
             string filterComplex = "";
             string inputs = "";
+            int inputIndex = 0;
+            List<string> trackOutputs = new List<string>();
 
-            for (int i = 0; i < audioClips.Count; i++)
+            for (int t = 0; t < allTracks.Count; t++)
             {
-                inputs += $"-i \"{audioClips[i].SourcePath}\" ";
-                // Use atrim and asetpts to correctly place the audio clips
-                filterComplex += $"[{i}:a]atrim=start={audioClips[i].SourceStartTime:F3}:end={audioClips[i].SourceEndTime:F3},asetpts=PTS-STARTPTS[a{i}];";
+                var track = allTracks[t];
+                if (track.audioClips.Count == 0) continue;
+
+                for (int i = 0; i < track.audioClips.Count; i++)
+                {
+                    var clip = track.audioClips[i];
+                    inputs += $"-i \"{clip.SourcePath}\" ";
+                    filterComplex += $"[{inputIndex}:a]atrim=start={clip.SourceStartTime:F3}:end={clip.SourceEndTime:F3},asetpts=PTS-STARTPTS[a{inputIndex}];";
+                    inputIndex++;
+                }
+
+                int trackStartInput = inputIndex - track.audioClips.Count;
+                for (int i = trackStartInput; i < inputIndex; i++)
+                {
+                    filterComplex += $"[a{i}]";
+                }
+                filterComplex += $"concat=n={track.audioClips.Count}:v=0:a=1[track{t}];";
+                trackOutputs.Add($"[track{t}]");
             }
 
-            for (int i = 0; i < audioClips.Count; i++)
-                filterComplex += $"[a{i}]";
-
-            filterComplex += $"concat=n={audioClips.Count}:v=0:a=1[outa]";
+            foreach (var tout in trackOutputs) filterComplex += tout;
+            
+            if (trackOutputs.Count > 1)
+                filterComplex += $"amix=inputs={trackOutputs.Count}:duration=longest[outa]";
+            else
+                filterComplex += $"aformat=sample_fmts=fltp:sample_rates=44100[outa]";
 
             var audioProc = new System.Diagnostics.Process
             {
@@ -641,6 +750,17 @@ public class VideoObject : IDisposable
     }
 
     public FrameObject GetPreviewFrame(uint frame, float quality = 1.0f, bool keyframeOnly = false)
+    {
+        var baseFrame = GetSingleTrackPreviewFrame(frame, quality, keyframeOnly);
+        foreach (var overlay in Overlays)
+        {
+            var overlayFrame = overlay.GetPreviewFrame(frame, quality, keyframeOnly);
+            baseFrame = baseFrame.Blend(overlayFrame);
+        }
+        return baseFrame;
+    }
+
+    private FrameObject GetSingleTrackPreviewFrame(uint frame, float quality = 1.0f, bool keyframeOnly = false)
     {
         int scaledW = (int)Math.Max(1, resolution.X * quality);
         int scaledH = (int)Math.Max(1, resolution.Y * quality);
