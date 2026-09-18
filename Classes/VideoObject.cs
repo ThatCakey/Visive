@@ -143,7 +143,7 @@ public class VideoObject : IDisposable
         }
     }
 
-    private VideoObject(string name, Vector2 resolution, float fps)
+    public VideoObject(string name, Vector2 resolution, float fps)
     {
         this.name = name;
         this.resolution = resolution;
