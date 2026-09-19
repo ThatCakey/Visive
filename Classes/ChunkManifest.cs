@@ -85,12 +85,17 @@ public class ChunkManifest
             ?? throw new InvalidOperationException("Failed to deserialize manifest");
     }
 
+    private readonly object _manifestLock = new();
+
     /// <summary>
     /// Find which chunk contains the given frame.
     /// </summary>
     public ChunkEntry? FindChunkForFrame(uint frameIndex)
     {
-        return Chunks.Find(c => frameIndex >= c.StartFrame && frameIndex < c.EndFrame);
+        lock (_manifestLock)
+        {
+            return Chunks.Find(c => frameIndex >= c.StartFrame && frameIndex < c.EndFrame);
+        }
     }
 
     /// <summary>
@@ -98,19 +103,31 @@ public class ChunkManifest
     /// </summary>
     public void AddOrUpdateChunk(ChunkEntry entry)
     {
-        var existing = Chunks.FindIndex(c => c.StartFrame == entry.StartFrame);
-        if (existing >= 0)
-            Chunks[existing] = entry;
-        else
-            Chunks.Add(entry);
+        lock (_manifestLock)
+        {
+            var existing = Chunks.FindIndex(c => c.StartFrame == entry.StartFrame);
+            if (existing >= 0)
+                Chunks[existing] = entry;
+            else
+                Chunks.Add(entry);
 
-        Chunks.Sort((a, b) => a.StartFrame.CompareTo(b.StartFrame));
+            Chunks.Sort((a, b) => a.StartFrame.CompareTo(b.StartFrame));
+        }
     }
 
     /// <summary>
     /// Get total disk space used by all chunks.
     /// </summary>
-    public long TotalCompressedBytes => Chunks.Sum(c => c.CompressedBytes);
+    public long TotalCompressedBytes
+    {
+        get
+        {
+            lock (_manifestLock)
+            {
+                return Chunks.Sum(c => c.CompressedBytes);
+            }
+        }
+    }
 
     /// <summary>
     /// Get compression ratio: compressed / uncompressed.
@@ -119,8 +136,11 @@ public class ChunkManifest
     {
         get
         {
-            long total = Chunks.Sum(c => c.UncompressedBytes);
-            return total > 0 ? (double)TotalCompressedBytes / total : 0;
+            lock (_manifestLock)
+            {
+                long total = Chunks.Sum(c => c.UncompressedBytes);
+                return total > 0 ? (double)TotalCompressedBytes / total : 0;
+            }
         }
     }
 }
