@@ -105,3 +105,12 @@ dotnet run
 ```
 
 This will run a test sequence (loading, slicing, appending, and applying a video effect) on the provided test footage and export the result to `Testing/tmp/test_Export.mp4`.
+
+## Recent API Updates (Visive Engine)
+
+Recent improvements to the engine have focused on UI responsiveness and audio synchronization:
+
+- **Audio Support (`AudioClip`)**: `VideoObject` now tracks associated audio through the `audioClips` list, enabling synchronized audio extraction and timeline alignment.
+- **Asynchronous Caching**: Background chunk extraction is fully decoupled from the UI thread.
+- **Non-Blocking Frame Retrieval**: `GetPreviewFrame()` now accepts an `allowSync` parameter. Set to `false` during playback to instantly return `null` on cache misses rather than blocking the UI, allowing the timeline to buffer smoothly.
+- **`ChunkLoaded` Event**: `VideoObject` exposes a `ChunkLoaded` event that fires asynchronously when a background FFmpeg extraction completes. This is useful for triggering UI preview refreshes when a missing chunk has finally been cached into RAM.
