@@ -45,6 +45,7 @@ public class AudioClip
 public class VideoObject : IDisposable
 {
     public readonly string name;
+    public string Name => name;
     public readonly Vector2 resolution;
     public readonly float fps;
     public float length;
@@ -55,6 +56,8 @@ public class VideoObject : IDisposable
     public List<VideoClip> clips = new List<VideoClip>();
     public List<AudioClip> audioClips = new List<AudioClip>();
     public List<VideoObject> Overlays = new List<VideoObject>();
+    
+    public event Action? ChunkLoaded;
 
     private ChunkManifest? manifest;
     private ChunkCache? cache;
@@ -85,17 +88,17 @@ public class VideoObject : IDisposable
         initialClip.OnEffectsChanged += () => cache?.Clear();
         clips.Add(initialClip);
 
-        // Audio Extraction
+        // Audio Extraction (Raw PCM for streaming)
         string audioDir = Path.Combine(Directory.GetCurrentDirectory(), "tmp");
         Directory.CreateDirectory(audioDir);
-        string audioPath = Path.Combine(audioDir, $"{name}_audio.aac");
+        string audioPath = Path.Combine(audioDir, $"{name}_audio.pcm");
 
         var process = new System.Diagnostics.Process
         {
             StartInfo = new System.Diagnostics.ProcessStartInfo
             {
                 FileName = "ffmpeg",
-                Arguments = $"-y -i \"{absSource}\" -q:a 9 -map 0:a? \"{audioPath}\" -hide_banner -loglevel error",
+                Arguments = $"-y -i \"{absSource}\" -c:a pcm_s16le -f s16le -ar 48000 -ac 2 -map 0:a? \"{audioPath}\" -hide_banner -loglevel error",
                 UseShellExecute = false,
                 CreateNoWindow = true,
                 RedirectStandardError = true,
@@ -477,7 +480,7 @@ public class VideoObject : IDisposable
         {
             // Double-check if the chunk was extracted while we were waiting for the lock
             var checkChunk = manifest.FindChunkForFrame(startFrame);
-            if (checkChunk != null && !checkChunk.IsDirty)
+            if (checkChunk != null && cache.GetChunk(checkChunk) != null)
             {
                 return; // Another thread already extracted it!
             }
@@ -574,6 +577,7 @@ public class VideoObject : IDisposable
                 IsDirty = false
             };
             manifest.AddOrUpdateChunk(entry);
+            ChunkLoaded?.Invoke();
         }
     }
 
@@ -932,7 +936,7 @@ public class VideoObject : IDisposable
 
     public uint getFramefromTimecode(float timecode)
     {
-        if (timecode > length || timecode <= 0 || fps <= 0) return 0;
+        if (timecode < 0 || fps <= 0) return 0;
         return (uint)(timecode * fps);
     }
 
