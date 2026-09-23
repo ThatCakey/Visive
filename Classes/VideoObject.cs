@@ -219,6 +219,12 @@ public class VideoObject : IDisposable
         }
     }
 
+    public void InvalidateCache()
+    {
+        cache?.Clear();
+        manifest = ChunkManifest.Create(name, resolution, fps, (uint)(length * fps));
+    }
+
     public VideoObject Slice(float startTime, float endTime)
     {
         if (startTime < 0 || endTime <= startTime || endTime > length)
@@ -412,11 +418,11 @@ public class VideoObject : IDisposable
         var loopChunk = manifest?.FindChunkForFrame(frame);
         if (loopChunk == null)
         {
-            uint chunkSize = calculatedChunkSize;
-            uint chunkStart = (frame / chunkSize) * chunkSize;
-            uint chunkEnd = Math.Min(chunkStart + chunkSize, (uint)(length * fps));
-            if (chunkEnd > chunkStart)
-            {
+                uint chunkSize = calculatedChunkSize;
+                uint chunkStart = (frame / chunkSize) * chunkSize;
+                uint chunkEnd = Math.Min(chunkStart + chunkSize, (uint)Math.Ceiling(length * fps));
+                if (chunkEnd > chunkStart)
+                {
                 ExtractChunk(chunkStart, chunkEnd);
                 loopChunk = manifest?.FindChunkForFrame(frame);
             }
@@ -448,11 +454,11 @@ public class VideoObject : IDisposable
         var loopChunk = manifest?.FindChunkForFrame(frame);
         if (loopChunk == null)
         {
-            uint chunkSize = calculatedChunkSize;
-            uint chunkStart = (frame / chunkSize) * chunkSize;
-            uint chunkEnd = Math.Min(chunkStart + chunkSize, (uint)(length * fps));
-            if (chunkEnd > chunkStart)
-            {
+                uint chunkSize = calculatedChunkSize;
+                uint chunkStart = (frame / chunkSize) * chunkSize;
+                uint chunkEnd = Math.Min(chunkStart + chunkSize, (uint)Math.Ceiling(length * fps));
+                if (chunkEnd > chunkStart)
+                {
                 ExtractChunk(chunkStart, chunkEnd);
                 loopChunk = manifest?.FindChunkForFrame(frame);
             }
@@ -488,6 +494,7 @@ public class VideoObject : IDisposable
             long bytesPerFrame = (long)resolution.X * (long)resolution.Y * 4;
             long totalBytes = (endFrame - startFrame) * bytesPerFrame;
             byte[] chunkData = ChunkCache.RentBuffer((int)totalBytes);
+            byte[] tempBuffer = ChunkCache.RentBuffer((int)totalBytes);
             Array.Clear(chunkData, 0, chunkData.Length);
 
             foreach (var clip in clips)
@@ -504,7 +511,8 @@ public class VideoObject : IDisposable
 
                     // OPTIMIZATION: Instead of generating a black lavfi stream and overlaying, we use a single input stream
                     // and use the 'pad' filter to place it on a black canvas. This avoids costly alpha blending and dual-stream processing.
-                    string filterComplex = $"[0:v]scale={(int)clip.Resolution.X}:{(int)clip.Resolution.Y}:flags=fast_bilinear,setpts=PTS-STARTPTS,pad={(int)resolution.X}:{(int)resolution.Y}:{clip.Position.X}:{clip.Position.Y}:black[out]";
+                    // Use transparent padding so we can blend clips
+                    string filterComplex = $"[0:v]scale={(int)clip.Resolution.X}:{(int)clip.Resolution.Y}:flags=fast_bilinear,setpts=PTS-STARTPTS,pad={(int)resolution.X}:{(int)resolution.Y}:{clip.Position.X}:{clip.Position.Y}:0x00000000[out]";
 
                     using var process = new System.Diagnostics.Process
                     {
@@ -527,9 +535,41 @@ public class VideoObject : IDisposable
                     {
                         while (totalRead < expectedBytes)
                         {
-                            int read = stream.Read(chunkData, (int)offsetInChunk + totalRead, expectedBytes - totalRead);
+                            int read = stream.Read(tempBuffer, totalRead, expectedBytes - totalRead);
                             if (read == 0) break;
                             totalRead += read;
+                        }
+                    }
+                    
+                    // Blend the newly read frames into the chunkData
+                    unsafe 
+                    {
+                        fixed (byte* pBase = &chunkData[offsetInChunk])
+                        fixed (byte* pOver = tempBuffer)
+                        {
+                            for (int i = 0; i < totalRead; i += 4)
+                            {
+                                float a_overlay = pOver[i + 3] / 255f;
+                                if (a_overlay > 0)
+                                {
+                                    if (a_overlay >= 1.0f)
+                                    {
+                                        pBase[i] = pOver[i];
+                                        pBase[i + 1] = pOver[i + 1];
+                                        pBase[i + 2] = pOver[i + 2];
+                                        pBase[i + 3] = 255;
+                                    }
+                                    else
+                                    {
+                                        float a_base = pBase[i + 3] / 255f;
+                                        float a_out = a_overlay + a_base * (1 - a_overlay);
+                                        pBase[i] = (byte)((pOver[i] * a_overlay + pBase[i] * a_base * (1 - a_overlay)) / a_out);
+                                        pBase[i + 1] = (byte)((pOver[i + 1] * a_overlay + pBase[i + 1] * a_base * (1 - a_overlay)) / a_out);
+                                        pBase[i + 2] = (byte)((pOver[i + 2] * a_overlay + pBase[i + 2] * a_base * (1 - a_overlay)) / a_out);
+                                        pBase[i + 3] = (byte)(a_out * 255);
+                                    }
+                                }
+                            }
                         }
                     }
 
@@ -561,6 +601,8 @@ public class VideoObject : IDisposable
                     }
                 }
             }
+
+            ChunkCache.ReturnBuffer(tempBuffer);
 
             lock (cache)
             {
@@ -597,7 +639,7 @@ public class VideoObject : IDisposable
             {
                 uint chunkSize = calculatedChunkSize;
                 uint chunkStart = (frame / chunkSize) * chunkSize;
-                uint chunkEnd = Math.Min(chunkStart + chunkSize, (uint)(length * fps));
+                uint chunkEnd = Math.Min(chunkStart + chunkSize, (uint)Math.Ceiling(length * fps));
                 if (chunkEnd > chunkStart)
                 {
                     ExtractChunk(chunkStart, chunkEnd);
@@ -821,7 +863,7 @@ public class VideoObject : IDisposable
                 if (frame >= midpoint)
                 {
                     uint nextChunkStart = loopChunk.EndFrame;
-                    uint nextChunkEnd = Math.Min(nextChunkStart + calculatedChunkSize, (uint)(length * fps));
+                    uint nextChunkEnd = Math.Min(nextChunkStart + calculatedChunkSize, (uint)Math.Ceiling(length * fps));
                     
                     if (nextChunkStart < nextChunkEnd)
                     {
@@ -855,7 +897,7 @@ public class VideoObject : IDisposable
         if (!keyframeOnly)
         {
             uint chunkStart = (frame / calculatedChunkSize) * calculatedChunkSize;
-            uint chunkEnd = Math.Min(chunkStart + calculatedChunkSize, (uint)(length * fps));
+            uint chunkEnd = Math.Min(chunkStart + calculatedChunkSize, (uint)Math.Ceiling(length * fps));
             
             lock (extractingChunks)
             {
@@ -924,8 +966,36 @@ public class VideoObject : IDisposable
                     }
 
                     long copyLen = Math.Min(rawData.Length, frameData.Length);
-                    // Simple overwrite layering (matching ExtractChunk's current behavior)
-                    Array.Copy(rawData, 0, frameData, 0, copyLen);
+                    unsafe 
+                    {
+                        fixed (byte* pBase = frameData)
+                        fixed (byte* pOver = rawData)
+                        {
+                            for (int i = 0; i < copyLen; i += 4)
+                            {
+                                float a_overlay = pOver[i + 3] / 255f;
+                                if (a_overlay > 0)
+                                {
+                                    if (a_overlay >= 1.0f)
+                                    {
+                                        pBase[i] = pOver[i];
+                                        pBase[i + 1] = pOver[i + 1];
+                                        pBase[i + 2] = pOver[i + 2];
+                                        pBase[i + 3] = 255;
+                                    }
+                                    else
+                                    {
+                                        float a_base = pBase[i + 3] / 255f;
+                                        float a_out = a_overlay + a_base * (1 - a_overlay);
+                                        pBase[i] = (byte)((pOver[i] * a_overlay + pBase[i] * a_base * (1 - a_overlay)) / a_out);
+                                        pBase[i + 1] = (byte)((pOver[i + 1] * a_overlay + pBase[i + 1] * a_base * (1 - a_overlay)) / a_out);
+                                        pBase[i + 2] = (byte)((pOver[i + 2] * a_overlay + pBase[i + 2] * a_base * (1 - a_overlay)) / a_out);
+                                        pBase[i + 3] = (byte)(a_out * 255);
+                                    }
+                                }
+                            }
+                        }
+                    }
                     File.Delete(tmpRaw);
                 }
             }
