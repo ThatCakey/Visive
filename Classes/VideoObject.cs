@@ -172,7 +172,7 @@ public class VideoObject : IDisposable
         cache = new ChunkCache(chunksDirectory);
 
         long bytesPerFrame = (long)resolution.X * (long)resolution.Y * 4;
-        long targetChunkBytes = 500 * 1024 * 1024; // Target 500MB per chunk uncompressed (about 60 frames / 2s at 1080p)
+        long targetChunkBytes = 250 * 1024 * 1024; // Target 250MB per chunk uncompressed (about 30 frames / 1s at 1080p)
         calculatedChunkSize = (uint)Math.Max(1, targetChunkBytes / bytesPerFrame);
     }
 
@@ -702,7 +702,7 @@ public class VideoObject : IDisposable
             else
                 filterComplex += $"aformat=sample_fmts=fltp:sample_rates=44100[outa]";
 
-            var audioProc = new System.Diagnostics.Process
+            using var audioProc = new System.Diagnostics.Process
             {
                 StartInfo = new System.Diagnostics.ProcessStartInfo
                 {
@@ -827,7 +827,7 @@ public class VideoObject : IDisposable
                     {
                         lock (extractingChunks)
                         {
-                            if (!extractingChunks.Contains(nextChunkStart))
+                            if (extractingChunks.Count < 2 && !extractingChunks.Contains(nextChunkStart))
                             {
                                 extractingChunks.Add(nextChunkStart);
                                 Task.Run(() => 
@@ -859,7 +859,7 @@ public class VideoObject : IDisposable
             
             lock (extractingChunks)
             {
-                if (chunkEnd > chunkStart && !extractingChunks.Contains(chunkStart))
+                if (chunkEnd > chunkStart && extractingChunks.Count < 2 && !extractingChunks.Contains(chunkStart))
                 {
                     extractingChunks.Add(chunkStart);
                     Task.Run(() => 
@@ -896,7 +896,7 @@ public class VideoObject : IDisposable
                 string filterComplex = $"[1:v]scale={(int)(clip.Resolution.X * quality)}:{(int)(clip.Resolution.Y * quality)},setpts=PTS-STARTPTS[scaled]; [0:v][scaled]overlay={(int)(clip.Position.X * quality)}:{(int)(clip.Position.Y * quality)}:shortest=1[out]";
                 string skipArgs = keyframeOnly ? "-skip_frame nokey " : "";
 
-                var process = new System.Diagnostics.Process
+                using var process = new System.Diagnostics.Process
                 {
                     StartInfo = new System.Diagnostics.ProcessStartInfo
                     {
@@ -942,7 +942,7 @@ public class VideoObject : IDisposable
 
     private (Vector2 resolution, float fps, float length) LoadVideoMetadata(string filePath)
     {
-        var process = new System.Diagnostics.Process
+        using var process = new System.Diagnostics.Process
         {
             StartInfo = new System.Diagnostics.ProcessStartInfo
             {

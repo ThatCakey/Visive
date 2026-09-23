@@ -26,16 +26,19 @@ public class ChunkCache : IDisposable
 
     private readonly ConcurrentDictionary<uint, CachedChunk> memoryCache = new();
     private readonly object cacheLock = new object();
-    private readonly int maxMemoryChunks = 4; // e.g. 4 chunks * 500MB = 2GB RAM
+    private readonly int maxMemoryChunks = 3; // 3 chunks * 250MB = 750MB RAM
     
     // Pool to avoid LOH (Large Object Heap) Garbage Collection pauses
     private static readonly ConcurrentStack<byte[]> bufferPool = new();
+    private static long currentPoolBytes = 0;
+    private const long MaxPoolBytes = 800L * 1024 * 1024; // 800 MB pool limit
 
     public static byte[] RentBuffer(int size)
     {
         while (bufferPool.TryPop(out var buffer))
         {
-            if (buffer.Length == size) return buffer;
+            System.Threading.Interlocked.Add(ref currentPoolBytes, -buffer.Length);
+            if (buffer.Length >= size) return buffer;
         }
         return new byte[size];
     }
@@ -43,7 +46,13 @@ public class ChunkCache : IDisposable
     public static void ReturnBuffer(byte[] buffer)
     {
         if (buffer != null && buffer.Length > 0)
-            bufferPool.Push(buffer);
+        {
+            if (System.Threading.Interlocked.Read(ref currentPoolBytes) + buffer.Length <= MaxPoolBytes)
+            {
+                System.Threading.Interlocked.Add(ref currentPoolBytes, buffer.Length);
+                bufferPool.Push(buffer);
+            }
+        }
     }
 
     private readonly string chunksDirectory;
